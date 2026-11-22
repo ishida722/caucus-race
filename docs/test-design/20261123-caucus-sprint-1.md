@@ -7,7 +7,7 @@
 今回追加した `PlanningTools`（`src/caucus_race/mcp/planning_tools.py`）の各ツールと、その下の
 `PlanJobs` / `run_plan_job`（`src/caucus_race/plan_job.py`）。どれも引数と事前状態（DB 上の
 スプリント・ストーリーの状態、計画ジョブのロックと状態ファイル）で振る舞いが変わる。
-`server.py` は MCP の SDK が未導入のため対象外（SDK 導入後に別途扱う）。
+`server.py`（MCP の層）は、組み合わせとして分ける値を持たないため、この節では扱わない。MCP のクライアントから呼ぶテストは `tests/test_mcp_server.py` にある（下記「MCP の層と E2E」を参照）。
 
 期待値の出典: タスクの受け入れ条件、README の MCP の節、docs/spec.md の R-3
 （承認後は計画を変更できない）、既存の CLI と同じルール。例外の型とメッセージの詳細は
@@ -396,7 +396,7 @@ BV13 が保証するのは「追加した順で返る」という振る舞いま
 | 状態ファイルが壊れている場合の get_plan_status | 今は pydantic の ValidationError がそのまま伝わる（MCP では汎用のエラー）。failed として返すのか、エラーにするのかが仕様にない。別途報告済み |
 | ロックファイルや状態ファイルを書けない場合（ディレクトリの権限など） | OSError がそのまま伝わる。どう扱うかが仕様にない |
 | プロジェクト名に使える文字 | 登録時に拒否するかどうかが仕様にない（別途報告済み）。計画ジョブはファイル名を URL エンコードして安全にした。既存の RunLock（スプリント実行のロック）は同じ問題を持つが、今回の変更ではない |
-| `server.py` の、SDK に渡す部分（ToolFailure から CallToolResult への置き換えと、ツールの登録） | MCP の SDK が依存に入っていないため、テストできない。依存を追加するかどうかは人間の判断が必要。例外の振り分けは call_tool（X27〜X29）で確かめている |
+| `server.py` の、SDK に渡す部分（ToolFailure から CallToolResult への置き換えと、ツールの登録） | 当初は MCP の SDK が依存になかったため対象外としたが、依存に追加された（mcp 2.3.0）。`tests/test_mcp_server.py` で、MCP のクライアントから呼んで確かめる（下記「MCP の層と E2E」） |
 | 組み合わせテストの `pytest.raises(DomainError)` に `match` がない箇所 | 組み合わせテストの節の範囲。例外の理由とメッセージは、この節の X1〜X19 で確かめる。F28（manual かつジョブ実行中）のように、2 つの違反が重なったときにどちらの理由で拒否するかは仕様にない |
 
 ## 状態遷移テスト
@@ -495,7 +495,7 @@ e2〜e4 は、ジョブのプロセスが存在する R でだけ起きる。`ca
 
 ## プロパティテスト
 
-### 前提: Hypothesis が未導入（テストは生成した入力でまだ一度も動いていない）
+### 前提: Hypothesis が未導入（テストは生成した入力でまだ一度も動いていない。この観点は「未実施」）
 
 `uv add --dev hypothesis` は、この作業環境の権限で拒否された。回避はしていない。
 テストは `tests/test_mcp_planning_properties.py` に Hypothesis で書いた。冒頭の `pytest.importorskip` により、Hypothesis が入るまでは**理由付きで skip** される（`pytest -rs` で理由が表示される）。
@@ -554,3 +554,23 @@ e2〜e4 は、ジョブのプロセスが存在する R でだけ起きる。`ca
 
 **この修正の範囲:** 直したのは `file_stem`（ファイル名の作り方）だけである。サロゲートを含む値は、計画ジョブの状態ファイル（JSON）にも、DB（プロジェクトの登録・ストーリーの起票）にも保存できず、どちらも利用者向けでないエラーになる。
 既存の永続化の制約で、サロゲートを含むプロジェクトは登録できない。そのため、計画ジョブにサロゲートを含む名前が渡ることは、ツールを通しては起きない。入口でどう拒否するかは仕様不明として、別途報告した。
+
+## MCP の層と E2E
+
+レビューで、MCP の SDK が依存に追加された後も `server.py` が対象外のままだと指摘された。MCP のクライアントからツールを呼ぶテストを `tests/test_mcp_server.py` に追加した。
+
+| テスト | 保証する仕様 |
+| --- | --- |
+| `test_server_lists_the_eight_tools_with_their_arguments` | README に書いた 8 つのツールが、それぞれの引数とともに見える |
+| `test_server_returns_rule_violation_as_error_result_with_cli_message` | ルール違反（承認後の変更・存在しないプロジェクト・プランナー未設定）は、isError の結果になり、本文が CLI と同じメッセージ（前置きなし）になる。状態は変わらない |
+| `test_server_passes_all_arguments_to_tools` | 引数の多いツール（add_story・add_spike）で、引数が取り違えられずに保存される |
+| `test_server_plan_sprint_returns_running_before_planner_finishes_then_reports_result` | MCP の plan_sprint はプランナーの完了を待たずに running を返し、完了後の get_plan_status で計画が分かる（受け入れ条件の E2E） |
+| `test_server_reports_unexpected_error_and_keeps_serving` | 想定外の例外は isError（汎用）になり、サーバーは止まらず、理由は get_plan_status で分かる |
+| `test_caucus_mcp_command_serves_tools_over_stdio` | `caucus mcp` を本物のプロセスとして起動すると、stdio で MCP のクライアントとつながる |
+
+本物の起動器（`launch_detached`）については、`tests/test_mcp_planning.py` の `test_real_launcher_returns_immediately_keeps_lock_and_redirects_output` で確かめる。
+- 子プロセスの終了を待たずに返る
+- ロックを子プロセスに引き継ぐ
+- 子プロセスの出力をログに書き、MCP の stdio に混ぜない
+
+長いプロジェクト名と、大文字小文字だけが違う名前のファイル名は、プロパティテストが未実施のため、通常のテスト `test_plan_job_file_names_are_distinct_and_creatable` でも確かめる。

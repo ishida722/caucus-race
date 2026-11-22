@@ -129,6 +129,10 @@ class AIPlanningService:
         draft = planner.create_sprint_plan(self._context(project, current))
 
         with self.repo.transaction():
+            # プランナーの呼び出し（数分かかる）の間に、人間がスプリントを作成・承認・開始して
+            # いないか確かめ直す。
+            # 変わっていれば、人間の計画を AI の計画で置き換えない（R-3）
+            current = self._unchanged_sprint(project, current)
             if current is None:
                 last = latest_sprint(self.repo, project)
                 sprint = self.repo.add(
@@ -167,6 +171,26 @@ class AIPlanningService:
             )
         )
         return sprint
+
+    def _unchanged_sprint(self, project: Project, before: Sprint | None) -> Sprint | None:
+        """計画を始めたときと同じ計画中のスプリント（なければ None）を DB から取り直す。
+
+        変わっていれば DomainError。
+        """
+        now_open = open_sprint(self.repo, project)
+        if before is None and now_open is None:
+            return None
+        if (
+            before is not None
+            and now_open is not None
+            and now_open.id == before.id
+            and now_open.status == SprintStatus.PLANNING
+        ):
+            return now_open
+        state = f"スプリント #{now_open.number}（{now_open.status}）" if now_open else "スプリントなし"
+        raise DomainError(
+            f"計画の作成中にスプリントが変更された（{state}）ため、AI の計画を反映しませんでした"
+        )
 
     def _clear_plan(self, sprint: Sprint) -> None:
         """再計画の前に、現在の計画のストーリーをバックログに戻す。回答済みのスパイクと決定事項は残す。"""

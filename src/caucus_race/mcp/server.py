@@ -2,8 +2,7 @@
 
 stdout は MCP のプロトコル通信に使うため、ここでは print しない。ログは stderr に出る。
 
-注意: MCP の Python SDK（パッケージ mcp）は、まだ pyproject.toml の依存に入っていない。
-`uv add mcp` で追加してから使う。ツールの中身は SDK に依存しない planning_tools.py にある。
+ツールの中身は SDK に依存しない planning_tools.py にある。
 """
 
 import functools

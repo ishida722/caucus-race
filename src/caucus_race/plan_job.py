@@ -79,15 +79,36 @@ def launch_detached(argv: list[str], log_path: Path, lock_fd: int) -> None:
 MAX_STEM_BYTES = 200
 
 
+def _escape_uppercase(quoted: str) -> str:
+    """URL エンコード済みの文字列の英大文字を %XX にする。
+
+    エンコードの結果は「英小文字・数字・記号」と「%XX（XX は大文字の 16 進数）」だけになる。
+    大文字小文字を同一視しても % で区切りが分かるため、元の名前ごとに異なるファイル名のままになる。
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(quoted):
+        if quoted[i] == "%":  # 既存のエスケープはそのまま残す
+            out.append(quoted[i : i + 3])
+            i += 3
+            continue
+        c = quoted[i]
+        out.append(f"%{ord(c):02X}" if "A" <= c <= "Z" else c)
+        i += 1
+    return "".join(out)
+
+
 def file_stem(project_name: str) -> str:
     """プロジェクト名を、1 つのファイル名として安全に使える形にする。
 
     - `/` や `..` を含んでも、1 つのファイル名になる（URL エンコードする）
+    - 大文字小文字だけが違う名前も、大文字小文字を区別しないファイルシステム（macOS の既定）で
+      別のファイル名になる（英大文字もエンコードする）
     - 長い名前（非 ASCII はエンコードで 9 倍になる）でも、ファイル名の長さの上限を超えない。
       上限を超える場合は先頭を残し、名前全体のハッシュを付ける。"%%" はエンコードの結果には現れないため、
       短い名前の結果と重ならない
     """
-    stem = urllib.parse.quote(project_name, safe="", errors="surrogatepass")
+    stem = _escape_uppercase(urllib.parse.quote(project_name, safe="", errors="surrogatepass"))
     if stem.strip(".") == "":
         stem = stem.replace(".", "%2E")
     if len(stem) > MAX_STEM_BYTES:
@@ -97,7 +118,8 @@ def file_stem(project_name: str) -> str:
 
 
 def plan_runner_argv(project_name: str) -> list[str]:
-    return [sys.executable, "-m", "caucus_race.cli.main", "plan", "run", project_name]
+    # "--" 以降は位置引数として扱われる（"-x" のような名前をオプションと解釈させない）
+    return [sys.executable, "-m", "caucus_race.cli.main", "plan", "run", "--", project_name]
 
 
 class PlanJobs:
@@ -175,6 +197,10 @@ class PlanJobs:
         """直近のジョブの状態。一度も実行していなければ None。"""
         state = self._read(project_name)
         if state is None or state.status != "running" or self.running(project_name):
+            return state
+        # 読んでからロックを確かめるまでの間に、ジョブが結果を書いて終わった可能性がある。読み直す
+        state = self._read(project_name)
+        if state is None or state.status != "running":
             return state
         log = f"（ログ: {state.log_path}）" if state.log_path else ""
         return state.model_copy(

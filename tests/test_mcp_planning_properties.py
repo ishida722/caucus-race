@@ -121,6 +121,7 @@ def check_file_stems_are_distinct(names: list[str]) -> None:
 @example(names=[LONG_NAME, LONG_NAME + "x", LONG_NAME[:-1]])
 @example(names=["\ud800", "%ED%A0%80"])
 @example(names=EDGE_NAMES)
+@example(names=["Foo", "foo", "FOO"])  # 大文字小文字を区別しないファイルシステムで重なる組
 def test_property_file_stem_is_injective(names: list[str]) -> None:
     """P2: 異なるプロジェクト名は、異なるファイル名になること（別のプロジェクトとロックを共有しない）。"""
     check_file_stems_are_distinct(names)

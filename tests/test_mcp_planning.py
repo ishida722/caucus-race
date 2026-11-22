@@ -4,9 +4,11 @@ MCP の SDK を介さず、ツールの関数を直接呼ぶ。ツールの関�
 別プロセスの起動（プロセス境界）だけを、同じ処理をスレッドで行う起動器に置き換える。
 """
 
+import fcntl
 import logging
 import os
 import re
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -121,6 +123,7 @@ class Env:
             FakeExecutor()
         )  # 子（計画ジョブ）とも共有し、テストからシナリオを差し替えられるようにする
         injector = self._make()
+        self.injector = injector
         self.tools = injector.get(PlanningTools)
         self.repo: Repository = injector.get(Repository)  # type: ignore[type-abstract]
         self.projects = injector.get(ProjectService)
@@ -166,12 +169,15 @@ def env(tmp_path: Path, git_repo: Path, planner: GatedPlanner) -> Iterator[Env]:
 
 
 # --- 時間のかかる計画の作成 ---
+# 結果（成功・失敗・異常終了・再試行）の確認は、組み合わせテスト G と状態遷移テストに統合した
 
 
 def test_plan_sprint_returns_before_planner_finishes(env: Env, planner: GatedPlanner) -> None:
-    """plan_sprint はプランナーの完了を待たずに running を返し、
-    完了後に get_plan_status で結果を得られること。"""
-    story = env.tools.add_story(P, "一覧画面", acceptance_criteria=["新しい順に並ぶ"])
+    """plan_sprint は、プランナーが計画を作っている最中（完了を待たずに）に running を返すこと。
+
+    受け入れ条件「計画の作成に時間がかかっても、ツール呼び出しがタイムアウトで失敗しない」の中心。
+    プランナーは gate が開くまで返らないので、plan_sprint が完了を待つと 10 秒後に失敗する。"""
+    story = env.tools.add_story(P, "一覧画面")
     planner.plans.append(
         SprintPlanDraft(
             goal="記事を探せる",
@@ -182,90 +188,70 @@ def test_plan_sprint_returns_before_planner_finishes(env: Env, planner: GatedPla
     started = env.tools.plan_sprint(P)  # gate が閉じたままでも返る
 
     assert started.status == "running"
-    assert planner.called.wait(5)
+    assert planner.called.wait(5)  # プランナーは呼ばれて、まだ作成中
     assert env.tools.get_plan_status(P).status == "running"
 
-    planner.gate.set()
-    env.launcher.join()
 
-    done = env.tools.get_plan_status(P)
-    assert done.status == "succeeded"
-    assert done.sprint_number == 1
-    assert done.goal == "記事を探せる"
-    assert done.story_ids == [story.id]
-    sprint = env.repo.get(Story, story.id).sprint_id
-    assert sprint is not None and env.repo.get(Sprint, sprint).status == SprintStatus.PLANNING
-
-
-def test_planner_failure_is_reported_by_status(env: Env, planner: GatedPlanner) -> None:
-    """プランナーが失敗したとき、get_plan_status が failed と失敗の理由を返すこと。"""
-    planner.error = PlannerError("claude がタイムアウトしました")
-    planner.gate.set()
-    env.tools.plan_sprint(P)
-    env.launcher.join()
-
-    status = env.tools.get_plan_status(P)
-    assert status.status == "failed"
-    assert status.error is not None and "claude がタイムアウトしました" in status.error
-
-
-def test_job_that_died_without_result_is_reported_as_failed(env: Env) -> None:
-    """計画のプロセスが結果を書かずに終了したとき、running のままにせず failed として返すこと。"""
-    env.launcher.started = False
-    env.tools.plan_sprint(P)
-
-    status = env.tools.get_plan_status(P)
-    assert status.status == "failed"
-    assert status.error is not None and "異常終了" in status.error
-
-
-def test_plan_can_be_retried_after_failure(env: Env, planner: GatedPlanner) -> None:
-    """計画の作成が失敗した後は、plan_sprint をもう一度呼べること（ロックが残らない）。"""
-    planner.error = PlannerError("失敗")
-    planner.gate.set()
-    env.tools.plan_sprint(P)
-    env.launcher.join()
-
-    assert env.tools.plan_sprint(P).status == "running"
-    env.launcher.join()
-
-
-def test_detached_plan_process_writes_result(
-    tmp_path: Path, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+def test_real_launcher_returns_immediately_keeps_lock_and_redirects_output(
+    tmp_path: Path, capfd: pytest.CaptureFixture[str]
 ) -> None:
-    """実際に別プロセス（caucus plan run）で計画を作り、終了後に結果が状態として読めること。
+    """本物の起動器（launch_detached）は、子プロセスの終了を待たずにすぐ返り、
+    ロックを子プロセスに引き継ぎ、子プロセスの出力をログに書く（MCP の stdio に混ぜない）こと。
 
-    本物の AI プランナーは呼べないため、AI プランナー未設定のプロジェクトで
-    「失敗の結果が書かれる」ことを確かめる。
-    """
-    home = tmp_path / "home"
-    monkeypatch.setenv("CAUCUS_HOME", str(home))
-    settings = Settings(data_dir=home)
-    Injector([AppModule(settings)]).get(ProjectService).register(P, git_repo)
-    jobs = PlanJobs(settings.run_dir, settings.log_dir, launch_detached)
+    子プロセスは出力してから 3 秒眠る。起動器が子の終了を待つと、1 秒以内には返らない。"""
+    lock_path = tmp_path / "x.plan.lock"
+    log_path = tmp_path / "logs" / "x.log"
+    child = [sys.executable, "-c", "import time; print('子の出力', flush=True); time.sleep(3)"]
+    fd = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
-    assert jobs.start(P).status == "running"
+    started = time.monotonic()
+    launch_detached(child, log_path, fd)
+    elapsed = time.monotonic() - started
+    os.close(fd)  # 起動側はロックを手放す。子プロセスが持ち続ける
 
-    deadline = time.monotonic() + 30
-    while (state := jobs.status(P)) is not None and state.status == "running":
-        assert time.monotonic() < deadline, "計画のプロセスが終わりませんでした"
-        time.sleep(0.2)
-    assert state is not None and state.status == "failed"
-    assert state.error is not None and "AI プランナーが設定されていません" in state.error
+    assert elapsed < 1.0, f"起動器が {elapsed:.1f} 秒待ちました"
+    other = os.open(lock_path, os.O_RDONLY)
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(other, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    finally:
+        os.close(other)
+    deadline = time.monotonic() + 10
+    while "子の出力" not in (log_path.read_text(encoding="utf-8") if log_path.exists() else ""):
+        assert time.monotonic() < deadline, "子プロセスの出力がログに書かれませんでした"
+        time.sleep(0.1)
+    captured = capfd.readouterr()
+    assert "子の出力" not in captured.out + captured.err
 
 
-# --- 正常系: 起票と人手の計画 ---
+LONG_NAME = "記" * 40  # URL エンコードで 360 バイトになり、ファイル名の上限を超える名前
 
 
-def test_add_story_puts_story_in_backlog_with_acceptance_criteria(env: Env) -> None:
-    """add_story で追加したストーリーが、受け入れ条件を持ってバックログに入ること。"""
-    result = env.tools.add_story(P, "一覧画面", "記事の一覧", ["新しい順に並ぶ", "20 件ずつ表示する"])
+@pytest.mark.parametrize(
+    "names",
+    [
+        pytest.param(["Foo", "foo", "FOO"], id="case-only"),
+        pytest.param([LONG_NAME, LONG_NAME + "x", LONG_NAME[:-1]], id="long-same-prefix"),
+        pytest.param(["a" * 199, "a" * 200, "a" * 201], id="truncation-edge"),
+        pytest.param(["a/b", "a%2Fb", "A%2FB"], id="escape-lookalike"),
+        pytest.param([".", "..", "%2E"], id="dots"),
+    ],
+)
+def test_plan_job_file_names_are_distinct_and_creatable(tmp_path: Path, names: list[str]) -> None:
+    """異なるプロジェクト名の計画ジョブのファイルは、大文字小文字を区別しないファイルシステムでも
+    別々のファイルとして作られ、どれも 1 つのディレクトリの直下にできること（名前の長さ・記号によらない）。"""
+    for name in names:
+        jobs = PlanJobs(tmp_path / "run", tmp_path / "logs", lambda argv, log, fd: None)
+        jobs.start(name)  # 起動器は何もしない（ジョブは異常終了の扱いになる）
+    files = sorted(p for p in (tmp_path / "run").iterdir() if p.name.endswith(".plan.json"))
+    assert len(files) == len(names), [p.name for p in files]
+    for name in names:
+        state = PlanJobs(tmp_path / "run", tmp_path / "logs").status(name)
+        assert state is not None and state.project == name  # 他の名前の状態と混ざらない
 
-    story = env.repo.get(Story, result.id)
-    assert story.status == StoryStatus.BACKLOG
-    assert story.sprint_id is None
-    assert story.description == "記事の一覧"
-    assert story.acceptance_criteria == ["新しい順に並ぶ", "20 件ずつ表示する"]
+
+# --- 正常系: 人手の計画 ---
 
 
 def test_manual_planning_flow_builds_sprint(env: Env) -> None:
@@ -737,6 +723,25 @@ def test_combo_add_spike_optional_arguments(
 # --- H. 計画ジョブのロックはプロジェクトごと ---
 
 
+def _edit_applied(env: Env, tool: str, project: str) -> bool:
+    """_prepare_edit の操作が実際に反映されたか。"""
+    project_id = env.repo.query(Project, name=project)[0].id
+    sprints = env.repo.query(Sprint, project_id=project_id)
+    stories = env.repo.query(Story, project_id=project_id)
+    match tool:
+        case "create_sprint":
+            return [s.goal for s in sprints] == ["ゴール"]
+        case "add_story_to_sprint":
+            return [s.title for s in stories if s.sprint_id] == ["追加する"]
+        case "remove_story_from_sprint":
+            return all(s.sprint_id is None for s in stories)
+        case "add_task":
+            return [t.title for s in stories for t in env.repo.query(Task, story_id=s.id)] == ["タスク"]
+        case "add_spike":
+            return [x.question for s in stories for x in env.repo.query(Spike, story_id=s.id)] == ["質問"]
+    raise AssertionError(tool)
+
+
 def _prepare_edit(env: Env, tool: str, project: str) -> Callable[[], object]:
     """project に対する計画変更の操作を、実行できる事前状態にして返す。"""
     match tool:
@@ -775,11 +780,13 @@ def test_combo_planning_lock_is_per_project(
     before = story_snapshot(env)
 
     if running_on == "same":
-        with pytest.raises(DomainError):
+        with pytest.raises(DomainError, match="計画を作成中のため変更できません"):
             operation()
         assert story_snapshot(env) == before
+        assert not _edit_applied(env, tool, project)
     else:
-        operation()  # 例外にならない
+        operation()
+        assert _edit_applied(env, tool, project)
 
 
 # --- F. plan_sprint ---
@@ -894,6 +901,9 @@ def test_combo_detached_plan_process_receives_non_ascii_project_name(
         time.sleep(0.2)
     assert state is not None and state.status == "failed"
     assert state.error is not None and "AI プランナーが設定されていません" in state.error
+    # 失敗の原因を調べられるよう、ログの場所が返り、そこに理由が書かれている
+    assert state.log_path is not None and state.log_path.parent == settings.log_dir
+    assert "AI プランナーが設定されていません" in state.log_path.read_text(encoding="utf-8")
 
 
 # --- G. get_plan_status と run_plan_job の結果 ---
@@ -1508,7 +1518,7 @@ def test_exception_keyboard_interrupt_is_not_swallowed(env: Env, planner: GatedP
     失敗や成功の結果を書かないこと（プロセスが生きている間は running のまま）。
 
     プロセスが終わってロックが外れた後に failed（異常終了）と判定されることは、
-    test_job_that_died_without_result_is_reported_as_failed が保証する。"""
+    組み合わせテスト G7 と状態遷移テストの R-e4 が保証する。"""
     hold_plan_job(env)  # 子プロセスとしてロックを持っている状態
     planner.error = KeyboardInterrupt()  # type: ignore[assignment]
     planner.gate.set()
@@ -1539,18 +1549,21 @@ def test_exception_cli_plan_run_exits_with_1_on_failure(
     home = tmp_path / "home"
     monkeypatch.setenv("CAUCUS_HOME", str(home))
     cli.container.cache_clear()
-    runner = CliRunner()
-    if register:
-        assert runner.invoke(cli.app, ["project", "add", project, "--repo", str(git_repo)]).exit_code == 0
+    try:
+        runner = CliRunner()
+        if register:
+            added = runner.invoke(cli.app, ["project", "add", project, "--repo", str(git_repo)])
+            assert added.exit_code == 0
 
-    result = runner.invoke(cli.app, ["plan", "run", project])
+        result = runner.invoke(cli.app, ["plan", "run", project])
 
-    assert result.exit_code == 1
-    settings = Settings(data_dir=home)
-    state = PlanJobs(settings.run_dir, settings.log_dir).status(project)
-    assert state is not None and state.status == "failed"
-    assert reason in (state.error or "")
-    cli.container.cache_clear()
+        assert result.exit_code == 1
+        settings = Settings(data_dir=home)
+        state = PlanJobs(settings.run_dir, settings.log_dir).status(project)
+        assert state is not None and state.status == "failed"
+        assert reason in (state.error or "")
+    finally:
+        cli.container.cache_clear()  # 失敗しても、この CAUCUS_HOME の container を後続に残さない
 
 
 @pytest.mark.parametrize(
@@ -1559,6 +1572,7 @@ def test_exception_cli_plan_run_exits_with_1_on_failure(
         pytest.param("team/app", id="X25-slash"),
         pytest.param("../escape", id="X25-parent-dir"),
         pytest.param("..", id="X25-dot-dot"),
+        pytest.param(LONG_NAME, id="X25-long-name"),
     ],
 )
 def test_exception_project_name_with_path_characters_stays_in_data_dirs(
@@ -1595,7 +1609,9 @@ def test_exception_unreadable_state_file_does_not_hide_saved_plan(
     )
     planner.gate.set()
     hold_plan_job(env)
-    for state_file in env.jobs.run_dir.glob("*.plan.json"):  # ファイル境界: 状態ファイルを壊す
+    state_files = list(env.jobs.run_dir.glob("*.plan.json"))
+    assert state_files, "状態ファイルが見つかりません（ファイル名の規則が変わった）"
+    for state_file in state_files:  # ファイル境界: 状態ファイルを壊す
         state_file.write_text("{壊れた JSON", encoding="utf-8")
 
     with caplog.at_level(logging.WARNING, logger="caucus_race.plan_job"):
@@ -1781,7 +1797,9 @@ class JobDriver:
         elif state == "D":
             self.e4_die()
         if state == "C":  # ファイル境界: プロセスのない状態で、状態ファイルを壊す
-            for path in self.env.jobs.run_dir.glob("*.plan.json"):
+            paths = list(self.env.jobs.run_dir.glob("*.plan.json"))
+            assert paths, "状態ファイルが見つかりません（ファイル名の規則が変わった）"
+            for path in paths:
                 path.write_text("{壊れた JSON", encoding="utf-8")
             return
         assert self.observe() == state, f"事前状態 {state} を作れませんでした: {self.describe()}"
@@ -1844,6 +1862,8 @@ def test_state_plan_job_transition(
     }
     before = d.status() if state != "C" else None
     files_before = d.state_files()
+    # 状態ファイルがあるはずの状態で空なら、ファイル名の規則が変わって比較が空振りしている
+    assert bool(files_before) == (state != "N"), files_before.keys()
     stories_before = story_snapshot(env)
     tasks_before = len(env.repo.query(Task))
 
@@ -2018,3 +2038,128 @@ def test_state_sequence_concurrent_double_start_allows_only_one(env: Env, planne
         assert "既に作成中です" in str(rejected[0])
         assert len(env.launcher.held) == 1  # 起動されたプロセスも 1 つだけ
         env.launcher.release()
+
+
+# =====================================================================
+# 再現テスト（レビュー指摘）。修正前は落ち、修正後に通る
+# =====================================================================
+
+
+def test_repro_plan_does_not_override_sprint_approved_while_planner_runs(
+    env: Env, planner: GatedPlanner
+) -> None:
+    """レビュー指摘（ai_planning.py の plan が状態を確かめ直さない）:
+    AI の計画の作成中（プランナーの呼び出し中）に人間が CLI でスプリントを承認したとき、
+    完了したジョブは承認済みの計画を AI の計画で置き換えず、失敗として報告すること（R-3）。"""
+    put_sprint_in(env, "planning")
+    candidate = env.tools.add_story(P, "AI が選ぶ").id
+    planner.plans.append(
+        SprintPlanDraft(goal="AI のゴール", stories=[PlannedStoryDraft(story_id=candidate, title="")])
+    )
+    env.tools.plan_sprint(P)
+    assert planner.called.wait(5)
+    env.planning.approve(P)  # プランナーの呼び出し中に、人間が承認する
+    approved_stories = story_snapshot(env)
+
+    planner.gate.set()
+    env.launcher.join()
+
+    sprint = env.repo.query(Sprint)[0]
+    assert (sprint.status, sprint.goal) == (SprintStatus.APPROVED, "既存のゴール")
+    assert story_snapshot(env) == approved_stories
+    assert env.tools.get_plan_status(P).status == "failed"
+
+
+def test_repro_plan_does_not_create_second_open_sprint_when_human_creates_one_meanwhile(
+    env: Env, planner: GatedPlanner
+) -> None:
+    """レビュー指摘（同上）: スプリントがない状態で計画を始め、
+    プランナーの呼び出し中に人間がスプリントを作ったとき、
+    完了したジョブは 2 つ目の未終了のスプリントを作らず、失敗として報告すること。"""
+    candidate = env.tools.add_story(P, "AI が選ぶ").id
+    planner.plans.append(
+        SprintPlanDraft(goal="AI のゴール", stories=[PlannedStoryDraft(story_id=candidate, title="")])
+    )
+    env.tools.plan_sprint(P)
+    assert planner.called.wait(5)
+    env.planning.new_sprint(P, "人間のスプリント")  # プランナーの呼び出し中に、人間が作る
+
+    planner.gate.set()
+    env.launcher.join()
+
+    open_sprints = [s for s in env.repo.query(Sprint) if s.status != SprintStatus.CLOSED]
+    assert [s.goal for s in open_sprints] == ["人間のスプリント"]
+    assert env.repo.get(Story, candidate).status == StoryStatus.BACKLOG
+    assert env.tools.get_plan_status(P).status == "failed"
+
+
+def test_repro_status_reports_success_when_job_finishes_between_read_and_lock_check(
+    env: Env, planner: GatedPlanner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """レビュー指摘（plan_job.py の status の競合）: 問い合わせが状態ファイルを読んだ直後に、
+    ジョブのプロセスが成功の結果を書いて終わったとき、
+    問い合わせは「途中で異常終了」ではなく succeeded を返すこと。
+
+    競合の瞬間を作るため、ロックを確かめる OS の呼び出し（fcntl.flock、プロセス境界）の直前に、
+    ジョブのプロセスが結果を書いて終わる処理を差し込む。"""
+    story_id = env.tools.add_story(P, "計画対象").id
+    planner.plans.append(
+        SprintPlanDraft(goal="ゴール", stories=[PlannedStoryDraft(story_id=story_id, title="")])
+    )
+    planner.gate.set()
+    hold_plan_job(env)  # ジョブのプロセスがロックを持って作成中
+    real_flock = fcntl.flock
+    finished: list[bool] = []
+
+    def flock_after_job_finishes(fd: int, operation: int) -> None:
+        if not finished and operation == fcntl.LOCK_SH | fcntl.LOCK_NB:
+            finished.append(True)
+            run_plan_job(env.ai, env.jobs, P)  # ジョブのプロセスが成功の結果を書き、
+            env.launcher.release()  # 終了してロックが外れる
+        real_flock(fd, operation)
+
+    monkeypatch.setattr(fcntl, "flock", flock_after_job_finishes)
+    status = env.tools.get_plan_status(P)
+    monkeypatch.undo()
+
+    assert finished, "競合の瞬間を作れませんでした"
+    assert status.status == "succeeded", status.error
+    assert status.story_ids == [story_id]
+
+
+def test_repro_detached_plan_process_accepts_project_name_starting_with_dash(
+    tmp_path: Path, git_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """レビュー指摘（plan_runner_argv）: `-` で始まるプロジェクト名でも、別プロセスの計画の処理がその名前を
+    プロジェクト名として受け取り（オプションと解釈されず）、そのプロジェクトの結果を書くこと。
+
+    本物の AI プランナーは呼べないため、AI プランナー未設定のプロジェクトで
+    「そのプロジェクトのプランナーのエラー」が結果に書かれることで確かめる。"""
+    name = "-x"
+    home = tmp_path / "home"
+    monkeypatch.setenv("CAUCUS_HOME", str(home))
+    settings = Settings(data_dir=home)
+    Injector([AppModule(settings)]).get(ProjectService).register(name, git_repo)
+    jobs = PlanJobs(settings.run_dir, settings.log_dir, launch_detached)
+
+    jobs.start(name)
+
+    deadline = time.monotonic() + 30
+    while (state := jobs.status(name)) is not None and state.status == "running":
+        assert time.monotonic() < deadline, "計画のプロセスが終わりませんでした"
+        time.sleep(0.2)
+    assert state is not None and state.status == "failed"
+    assert "AI プランナーが設定されていません" in (state.error or ""), state.error
+
+
+def test_repro_projects_differing_only_in_case_have_separate_plan_jobs(env: Env, git_repo: Path) -> None:
+    """レビュー指摘（file_stem と大文字小文字を区別しないファイルシステム）: 大文字小文字だけが違う 2 つの
+    プロジェクトは、計画ジョブ（ロックと状態）を共有せず、一方の作成中にもう一方の計画を始められること。"""
+    env.projects.register("Foo", git_repo, planner_config={"type": "claude"})
+    env.projects.register("foo", git_repo, planner_config={"type": "claude"})
+    hold_plan_job(env, "Foo")
+
+    assert env.tools.get_plan_status("foo").status == "not_started"
+    env.launcher.hold = True
+    assert env.tools.plan_sprint("foo").status == "running"
+    assert env.tools.get_plan_status("Foo").status == "running"

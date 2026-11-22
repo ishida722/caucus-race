@@ -81,8 +81,6 @@ slack_webhook_env = "CAUCUS_SLACK_WEBHOOK_URL"   # Webhook の URL を入れた�
 
 `caucus mcp` で MCP サーバーを stdio で起動する。Claude Code などのエージェントとの対話の中で、バックログの起票とスプリント計画ができる。
 
-MCP の Python SDK（`mcp`）は依存に未追加のため、使う前に `uv add mcp` で追加する。
-
 ```bash
 claude mcp add caucus-race -- caucus mcp
 ```
@@ -98,7 +96,7 @@ claude mcp add caucus-race -- caucus mcp
 | `plan_sprint` | `project` | AI プランナーに計画を作らせる（`caucus plan sprint` 相当）。別プロセスで開始してすぐに返る |
 | `get_plan_status` | `project` | `plan_sprint` の状態（`not_started` / `running` / `succeeded` / `failed`） |
 
-- AI による計画の作成は数分かかるため、`plan_sprint` は `caucus plan run`（内部用）を別プロセスで起動して、完了を待たずに返る。エージェントは `get_plan_status` で結果を確認する。ログは `CAUCUS_HOME/logs/<project>-plan-*.log` に出る
+- AI による計画の作成は数分かかるため、`plan_sprint` は `caucus plan run`（内部用）を別プロセスで起動して、完了を待たずに返る。エージェントは `get_plan_status` で結果を確認する。ログは `CAUCUS_HOME/logs/<project>-plan-*.log` に出る（`<project>` はファイル名に使えるようエンコードしたもの。英大文字・記号・非 ASCII は `%XX` になり、長い名前は先頭とハッシュになる）。失敗したときは、`get_plan_status` の `log_path` でログの場所が分かる
 - 計画の作成中は、そのプロジェクトのスプリント計画を変更するツール（スプリントの作成、ストーリーの追加・除外、タスク・スパイクの追加）はエラーになる
 - ルール違反（承認後の計画変更、終了していないスプリントがある状態でのスプリント作成など）は、CLI の「エラー: ...」と同じメッセージがエラーの結果（isError）として返る
 - 計画の承認・スパイクへの回答・スプリントの実行は、人間が `caucus` コマンドで行う
