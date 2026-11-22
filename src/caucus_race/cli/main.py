@@ -14,6 +14,7 @@ from caucus_race.domain.entities import Feedback, Project, Spike, Story, Task
 from caucus_race.domain.errors import DomainError
 from caucus_race.domain.status import Author, SpikeStatus, SprintStatus
 from caucus_race.orchestrator import Orchestrator
+from caucus_race.plan_job import PlanJobs, run_plan_job
 from caucus_race.port.notifier import HumanActionRequired, Notifier
 from caucus_race.port.planner import PlannerError
 from caucus_race.port.repository import Repository
@@ -486,6 +487,13 @@ def plan_sprint(project: str) -> None:
     sprint_show(project)
 
 
+@plan_app.command("run", hidden=True)
+def plan_run(project: str) -> None:
+    """（内部用）スプリント計画を作成し、結果をジョブの状態に書く。MCP の plan_sprint が起動する。"""
+    if not run_plan_job(get(AIPlanningService), get(PlanJobs), project):
+        raise SystemExit(1)
+
+
 @plan_app.command("refine")
 def plan_refine(story_id: str) -> None:
     """スパイクの回答を踏まえて、AI にストーリーのタスクと受け入れ条件を見直させる。"""
@@ -614,6 +622,17 @@ def notifications(limit: Annotated[int, typer.Option("--limit", "-n")] = 20) -> 
     history = HistoryNotifier(get(Settings).data_dir / "notifications.jsonl")
     for record in history.read(limit):
         typer.echo(f"{record['at'][:19]} [{record['kind']}] {record['project']}: {record['message']}")
+
+
+@app.command("mcp")
+def mcp() -> None:
+    """MCP サーバーを stdio で起動する。
+
+    Claude Code などのエージェントから、バックログの起票とスプリント計画を行うために使う。
+    """
+    from caucus_race.mcp.server import create_server
+
+    create_server(container()).run("stdio")
 
 
 if __name__ == "__main__":

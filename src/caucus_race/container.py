@@ -16,6 +16,7 @@ from caucus_race.adapter.planner.manual import ManualPlanner
 from caucus_race.adapter.workspace.git import GitWorkspace
 from caucus_race.domain.entities import Project
 from caucus_race.domain.errors import DomainError
+from caucus_race.plan_job import PlanJobs
 from caucus_race.port.executor import Executor, ExecutorFactory
 from caucus_race.port.notifier import Notifier
 from caucus_race.port.planner import Planner, PlannerFactory
@@ -81,6 +82,7 @@ class AppModule(Module):
         binder.bind(Notifier, to=InstanceProvider(build_notifier(self.settings)))  # type: ignore[type-abstract]
         binder.bind(ExecutorFactory, to=ConfiguredExecutorFactory, scope=singleton)  # type: ignore[type-abstract]
         binder.bind(PlannerFactory, to=ConfiguredPlannerFactory, scope=singleton)  # type: ignore[type-abstract]
+        binder.bind(PlanJobs, to=InstanceProvider(PlanJobs(self.settings.run_dir, self.settings.log_dir)))
 
 
 def build_injector(settings: Settings | None = None) -> Injector:

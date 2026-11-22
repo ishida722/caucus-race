@@ -110,12 +110,20 @@ class AIPlanningService:
 
     # --- スプリント計画 ---
 
-    def plan(self, project_name: str) -> Sprint:
-        """AI にスプリント計画を作らせる。差し戻された計画があれば作り直させる。"""
+    def check_plannable(self, project_name: str) -> tuple[Project, Sprint | None]:
+        """AI に計画を作らせられる状態かを確かめ、プロジェクトと計画中のスプリント（なければ None）を返す。
+
+        終了していないスプリントが planning 以外（承認後・実行中・レビュー中）なら計画を変更できない（R-3）。
+        """
         project = project_by_name(self.repo, project_name)
         current = open_sprint(self.repo, project)
         if current is not None and current.status != SprintStatus.PLANNING:
             raise DomainError(f"スプリント #{current.number}（{current.status}）が終了していません")
+        return project, current
+
+    def plan(self, project_name: str) -> Sprint:
+        """AI にスプリント計画を作らせる。差し戻された計画があれば作り直させる。"""
+        project, current = self.check_plannable(project_name)
 
         planner = self.planners.for_project(project)
         draft = planner.create_sprint_plan(self._context(project, current))

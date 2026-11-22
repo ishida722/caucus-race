@@ -77,6 +77,32 @@ command = ["my-notify-script"]                   # 通知の内容を JSON で�
 slack_webhook_env = "CAUCUS_SLACK_WEBHOOK_URL"   # Webhook の URL を入れた環境変数の名前
 ```
 
+## MCP サーバー
+
+`caucus mcp` で MCP サーバーを stdio で起動する。Claude Code などのエージェントとの対話の中で、バックログの起票とスプリント計画ができる。
+
+MCP の Python SDK（`mcp`）は依存に未追加のため、使う前に `uv add mcp` で追加する。
+
+```bash
+claude mcp add caucus-race -- caucus mcp
+```
+
+| ツール | 引数 | 内容 |
+| --- | --- | --- |
+| `add_story` | `project`, `title`, `description`, `acceptance_criteria` | バックログにストーリーを追加する（`caucus story add` 相当） |
+| `create_sprint` | `project`, `goal` | スプリントを作成する（`caucus sprint new` 相当） |
+| `add_story_to_sprint` | `project`, `story_id` | 計画中のスプリントにストーリーを追加する |
+| `remove_story_from_sprint` | `project`, `story_id` | スプリントからストーリーを外してバックログに戻す |
+| `add_task` | `story_id`, `title`, `description` | ストーリーにタスクを追加する |
+| `add_spike` | `story_id`, `question`, `context`, `options`, `recommendation` | ストーリーにスパイクを起票する |
+| `plan_sprint` | `project` | AI プランナーに計画を作らせる（`caucus plan sprint` 相当）。別プロセスで開始してすぐに返る |
+| `get_plan_status` | `project` | `plan_sprint` の状態（`not_started` / `running` / `succeeded` / `failed`） |
+
+- AI による計画の作成は数分かかるため、`plan_sprint` は `caucus plan run`（内部用）を別プロセスで起動して、完了を待たずに返る。エージェントは `get_plan_status` で結果を確認する。ログは `CAUCUS_HOME/logs/<project>-plan-*.log` に出る
+- 計画の作成中は、そのプロジェクトのスプリント計画を変更するツール（スプリントの作成、ストーリーの追加・除外、タスク・スパイクの追加）はエラーになる
+- ルール違反（承認後の計画変更、終了していないスプリントがある状態でのスプリント作成など）は、CLI の「エラー: ...」と同じメッセージがエラーの結果（isError）として返る
+- 計画の承認・スパイクへの回答・スプリントの実行は、人間が `caucus` コマンドで行う
+
 ## 開発
 
 ```bash
