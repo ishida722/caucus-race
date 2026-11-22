@@ -65,6 +65,4 @@ def story_to_refine(repo: Repository, spike: Spike) -> Story | None:
     project = repo.get(Project, story.project_id)
     if project.planner_config.get("type", "manual") == "manual":
         return None
-    if repo.query(Spike, story_id=story.id, status=SpikeStatus.OPEN):
-        return None
     return story
