@@ -17,6 +17,7 @@ from caucus_race.port.planner import (
     FeedbackView,
     PlannerError,
     PlanningContext,
+    ReviewGuideDraft,
     SprintPlanDraft,
     StoryRefinementDraft,
     StoryView,
@@ -145,3 +146,8 @@ class ClaudePlanner:
             "feedback": [f.model_dump(exclude_none=True) for f in feedback],
         }
         return self._ask(self._prompt(prompts.CONVERT_FEEDBACK, payload), FeedbackConversionDraft)
+
+    def write_review_guide(self, context: PlanningContext) -> ReviewGuideDraft:
+        return self._ask(
+            self._prompt(prompts.REVIEW_GUIDE, context.model_dump(exclude_none=True)), ReviewGuideDraft
+        )

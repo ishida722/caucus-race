@@ -87,7 +87,7 @@ class SqliteRepository:
         url = "sqlite://" if str(db_path) == ":memory:" else f"sqlite:///{db_path}"
         if str(db_path) != ":memory:":
             Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-        self._engine = create_engine(url)
+        self._engine = create_engine(url, connect_args={"timeout": 30})
 
         @event.listens_for(self._engine, "connect")
         def _pragma(dbapi_conn: Any, _: Any) -> None:

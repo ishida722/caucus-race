@@ -56,6 +56,9 @@ class GitWorkspace:
         self._git(repo, "reset", "--hard", sha)
         self._git(repo, "clean", "-fd")
 
+    def diff_stat(self, repo: Path, base: str, head: str) -> str:
+        return self._git(repo, "diff", "--stat", base, head)
+
     def commits_between(self, repo: Path, base: str, head: str) -> list[str]:
         out = self._git(repo, "rev-list", "--reverse", f"{base}..{head}")
         return out.splitlines() if out else []

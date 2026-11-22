@@ -2,6 +2,13 @@ from injector import Binder, Injector, InstanceProvider, Module, singleton
 
 from caucus_race.adapter.executor.fake import FakeExecutor
 from caucus_race.adapter.executor.vuoi import VuoiConfig, VuoiExecutor
+from caucus_race.adapter.notifier.channels import (
+    CommandNotifier,
+    DesktopNotifier,
+    HistoryNotifier,
+    MultiNotifier,
+    SlackWebhookNotifier,
+)
 from caucus_race.adapter.notifier.console import ConsoleNotifier
 from caucus_race.adapter.persistence.sqlite import SqliteRepository
 from caucus_race.adapter.planner.claude import ClaudePlanner, ClaudePlannerConfig
@@ -47,6 +54,22 @@ class ConfiguredPlannerFactory:
                 raise DomainError(f"プランナー {kind} には対応していません")
 
 
+def build_notifier(settings: Settings) -> Notifier:
+    """config.toml の [notify] に従って通知の送り先を組み立てる。標準エラーと履歴には常に出す。"""
+    notifiers: list[Notifier] = [
+        ConsoleNotifier(),
+        HistoryNotifier(settings.data_dir / "notifications.jsonl"),
+    ]
+    config = settings.notify
+    if config.desktop:
+        notifiers.append(DesktopNotifier())
+    if config.command:
+        notifiers.append(CommandNotifier(config.command))
+    if config.slack_webhook_env:
+        notifiers.append(SlackWebhookNotifier(config.slack_webhook_env))
+    return MultiNotifier(notifiers)
+
+
 class AppModule(Module):
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -55,7 +78,7 @@ class AppModule(Module):
         binder.bind(Settings, to=InstanceProvider(self.settings))
         binder.bind(Repository, to=InstanceProvider(SqliteRepository(self.settings.db_path)))  # type: ignore[type-abstract]
         binder.bind(Workspace, to=GitWorkspace, scope=singleton)  # type: ignore[type-abstract]
-        binder.bind(Notifier, to=ConsoleNotifier, scope=singleton)  # type: ignore[type-abstract]
+        binder.bind(Notifier, to=InstanceProvider(build_notifier(self.settings)))  # type: ignore[type-abstract]
         binder.bind(ExecutorFactory, to=ConfiguredExecutorFactory, scope=singleton)  # type: ignore[type-abstract]
         binder.bind(PlannerFactory, to=ConfiguredPlannerFactory, scope=singleton)  # type: ignore[type-abstract]
 

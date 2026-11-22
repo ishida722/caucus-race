@@ -50,15 +50,31 @@ caucus sprint approve myapp
 # 差し戻す場合: caucus sprint reject myapp -m "理由" → caucus plan sprint myapp
 
 # 実行する（caucus/sprint-1 ブランチを作り、ストーリーを順に vuoi に渡す）
-caucus sprint start myapp
-caucus sprint resume myapp   # 途中で止まった場合
+caucus sprint start myapp --detach   # バックグラウンドで実行（承認と同時なら sprint approve --start）
+caucus sprint logs myapp             # ログの末尾を表示
+caucus sprint stop myapp             # 止める
+caucus sprint resume myapp --detach  # 途中で止まった場合に再開
 
 # 人間: レビューする
-caucus review show myapp
+caucus review show myapp     # AI プランナーがあれば確認手順も載る
 caucus feedback add myapp "件数も表示したい"
 caucus review done myapp     # フィードバックを AI がストーリーに変換してバックログへ
 
 caucus status                # 全プロジェクトの状態と要対応
+caucus notifications         # 最近の通知
+```
+
+複数のプロジェクトは、それぞれ `--detach` で起動すれば並行に実行される。同じプロジェクトを二重に実行しようとするとエラーになる。
+
+## 通知
+
+人間の対応待ち（計画の確認、スパイクへの回答、スプリントレビュー、実行の停止）を通知する。`~/.local/share/caucus-race/config.toml` で送り先を選ぶ。
+
+```toml
+[notify]
+desktop = true                                   # macOS の通知センター
+command = ["my-notify-script"]                   # 通知の内容を JSON で標準入力に渡して実行する
+slack_webhook_env = "CAUCUS_SLACK_WEBHOOK_URL"   # Webhook の URL を入れた環境変数の名前
 ```
 
 ## 開発

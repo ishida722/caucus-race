@@ -238,7 +238,10 @@ def run_sprint(sprint_id):
 
 - 実行は直列。並列化する場合はストーリーごとに worktree を分ける必要がある。
 - `running` のまま停止していたストーリーは、再開時に作業ツリーの状態を確認してから再実行する（未コミットの変更をどう扱うかは実行器の設計次第）。
-- 起動方法は `caucus sprint start` からのバックグラウンド実行を想定する。常駐デーモンにするかは MVP 後に検討する。
+- 起動方法: `caucus sprint start` は端末で最後まで実行する。`--detach` を付けると、端末から切り離した別プロセス（`caucus sprint run`）で実行し、出力を `CAUCUS_HOME/logs/<project>-<時刻>.log` に書く。常駐デーモンは置かない。
+- 二重実行の防止: 実行プロセスは `CAUCUS_HOME/run/<project>.lock` のロック（flock）を保持する。同じプロジェクトのスプリントを 2 つのプロセスで実行しようとするとエラーになる。別のプロジェクトは別プロセスで並行に実行できる。複数プロセスが同じ SQLite に書き込むため、ロック待ちの時間を 30 秒にしている。
+- 停止: `caucus sprint stop` は実行プロセスのプロセスグループ（vuoi・claude を含む）に SIGTERM を送る。実行中だったストーリーは running のまま残り、`caucus sprint resume` で退避・巻き戻してから再実行される。
+- 実行プロセスが例外で止まった場合は `runner_error` を通知する。
 
 ## 6. 外部接続
 
@@ -333,12 +336,30 @@ class Planner(Protocol):
 
 ### 6.3 Notifier
 
-人間の対応待ちを知らせる。MVP では標準出力とデスクトップ通知。後で Slack や entwurf への起票を追加できるよう port にしておく。
+人間の対応待ちを知らせる。
 
 ```python
 class Notifier(Protocol):
     def notify(self, event: HumanActionRequired) -> None: ...
 ```
+
+| 通知の種類（kind） | 発生する場面 |
+|---|---|
+| `plan_ready` | AI がスプリント計画を作成した |
+| `spike_raised` | 実行中のストーリーが中断した、または見直しで新たなスパイクが出た |
+| `review_ready` | 全ストーリーが終わり、レビュー待ちになった |
+| `runner_error` | スプリントの実行プロセスが例外で止まった |
+
+送り先（`adapter/notifier/channels.py`）は `CAUCUS_HOME/config.toml` の `[notify]` で選ぶ。標準エラーと履歴（`CAUCUS_HOME/notifications.jsonl`、`caucus notifications` で表示）には常に出す。どの送り先も、失敗してもスプリントの進行を止めない。
+
+```toml
+[notify]
+desktop = true                          # macOS の通知センター（osascript）
+command = ["my-notify-script"]          # 通知の内容を JSON で標準入力に渡して実行する
+slack_webhook_env = "CAUCUS_SLACK_WEBHOOK_URL"   # Incoming Webhook の URL を入れた環境変数の名前
+```
+
+`command` は、entwurf への起票など任意の連携をつなぐための口として使う。Webhook の URL は秘密情報なので、ファイルには書かず環境変数で渡す。
 
 ### 6.4 Workspace（git 操作）
 
@@ -376,12 +397,12 @@ class Workspace(Protocol):
 
 ## 8. レビュー資料
 
-`review` 状態に入ったとき、次を含む Markdown を生成する（保存先: `<data_dir>/reviews/<project>/sprint-<n>.md`）。
+`caucus review show` で、次を含む Markdown を生成する（保存先: `CAUCUS_HOME/reviews/<project>/sprint-<n>.md`）。
 
-- スプリントゴール
-- ストーリーごとの結果（状態、要約、変更ファイル、受け入れ条件）
-- 中断・失敗したストーリーとその理由、関連するスパイク
-- 成果物の確認方法（実行器の要約から AI が作成）
+- スプリントゴール、ブランチ、完了したストーリーの件数
+- 確認手順（AI が作成）: AI プランナーが設定されていれば、リポジトリと各ストーリーの結果を読んで、成果物を操作して確認する手順を書かせる。初回に作成してスプリントに保存し、以降は使い回す（`--regenerate` で作り直す）
+- 変更の概要: ベースブランチとスプリント用ブランチの `git diff --stat`
+- ストーリーごとの結果: 状態、受け入れ条件（チェックリスト）、要約、中断理由・エラー、実行ログの場所、コミットと差分の統計、退避ブランチ、未解決のスパイク
 - 実行器が挙げた範囲外の課題
 
 ## 9. ディレクトリ構成（案）
@@ -414,5 +435,5 @@ caucus-race/
 | M1（完了） | domain・SQLite・CLI。人間がストーリーを手で起票し、計画・スパイク・承認・状態遷移が動く | FakeExecutor でスプリントが closed まで進む |
 | M2（実装済み・実際の vuoi での確認待ち） | オーケストレーターと VuoiExecutor | 実リポジトリでストーリーが vuoi により実装される |
 | M3（実装済み・実際の claude での確認待ち） | ClaudePlanner（計画作成・スパイク抽出・フィードバック変換） | 人間の操作が承認・回答・レビューだけになる |
-| M4 | 通知・レビュー資料・複数プロジェクトの並行実行 | |
+| M4（実装済み） | 通知・レビュー資料・複数プロジェクトの並行実行 | 実行をバックグラウンドに任せ、対応待ちを通知で受け取れる |
 | 以降 | レトロの活用、Web UI、ストーリーの並列実行 | |

@@ -5,7 +5,9 @@ from caucus_race.port.planner import (
     FeedbackConversionDraft,
     FeedbackView,
     Planner,
+    PlannerError,
     PlanningContext,
+    ReviewGuideDraft,
     SprintPlanDraft,
     StoryRefinementDraft,
     StoryView,
@@ -19,7 +21,9 @@ class FakePlanner:
         plans: list[SprintPlanDraft] | None = None,
         refinements: list[StoryRefinementDraft] | None = None,
         conversions: list[FeedbackConversionDraft] | None = None,
+        review_guides: list[ReviewGuideDraft] | None = None,
     ) -> None:
+        self.review_guides = list(review_guides or [])
         self.plans = list(plans or [])
         self.refinements = list(refinements or [])
         self.conversions = list(conversions or [])
@@ -41,6 +45,12 @@ class FakePlanner:
         if self.conversions:
             return self.conversions.pop(0)
         return convert_feedback_mechanically(feedback)
+
+    def write_review_guide(self, context: PlanningContext) -> ReviewGuideDraft:
+        self.contexts.append(context)
+        if not self.review_guides:
+            raise PlannerError("確認手順が用意されていません")
+        return self.review_guides.pop(0)
 
 
 class SinglePlannerFactory:

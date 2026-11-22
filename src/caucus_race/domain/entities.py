@@ -53,6 +53,7 @@ class Sprint(Entity):
     status: SprintStatus = SprintStatus.PLANNING
     branch: str | None = None
     plan_comment: str | None = None
+    review_guide: str | None = None
     approved_at: datetime | None = None
     started_at: datetime | None = None
     reviewed_at: datetime | None = None

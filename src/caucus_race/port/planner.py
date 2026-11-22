@@ -100,6 +100,22 @@ class FeedbackConversionDraft(BaseModel):
     stories: list[FeedbackStoryDraft]
 
 
+class ReviewGuideDraft(BaseModel):
+    overview: str = Field(description="このスプリントで何ができるようになったかの要約。2〜4 文")
+    steps: list[str] = Field(description="人間が成果物を実際に操作して確認する手順。起動方法から具体的に書く")
+    cautions: list[str] = Field(
+        default_factory=list, description="確認するときの注意点、未完了・中断したストーリーの影響"
+    )
+
+    def to_markdown(self) -> str:
+        lines = [self.overview, "", "確認手順:"]
+        lines += [f"{i}. {s}" for i, s in enumerate(self.steps, 1)]
+        if self.cautions:
+            lines += ["", "注意点:"]
+            lines += [f"- {c}" for c in self.cautions]
+        return "\n".join(lines)
+
+
 class FeedbackView(BaseModel):
     id: str
     body: str
@@ -124,6 +140,10 @@ class Planner(Protocol):
     def convert_feedback(
         self, context: PlanningContext, feedback: list[FeedbackView]
     ) -> FeedbackConversionDraft: ...
+
+    def write_review_guide(self, context: PlanningContext) -> ReviewGuideDraft:
+        """context.current_plan のスプリントについて、人間が成果物を確認する手順を書く。"""
+        ...
 
 
 class PlannerFactory(Protocol):

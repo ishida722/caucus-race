@@ -3,6 +3,7 @@ from caucus_race.port.planner import (
     FeedbackView,
     PlannerError,
     PlanningContext,
+    ReviewGuideDraft,
     SprintPlanDraft,
     StoryRefinementDraft,
     StoryView,
@@ -23,3 +24,6 @@ class ManualPlanner:
         self, context: PlanningContext, feedback: list[FeedbackView]
     ) -> FeedbackConversionDraft:
         return convert_feedback_mechanically(feedback)
+
+    def write_review_guide(self, context: PlanningContext) -> ReviewGuideDraft:
+        raise PlannerError("AI プランナーが設定されていません")

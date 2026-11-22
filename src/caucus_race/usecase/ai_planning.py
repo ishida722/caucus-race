@@ -292,6 +292,14 @@ class AIPlanningService:
                 return
         raise InvalidTransitionError(f"{story.id} は見直しできる状態ではありません（{story.status}）")
 
+    # --- レビュー ---
+
+    def review_guide(self, project: Project, sprint: Sprint) -> str:
+        """スプリントの成果物を人間が確認する手順を AI に書かせる。"""
+        planner = self.planners.for_project(project)
+        draft = planner.write_review_guide(self._context(project, sprint))
+        return draft.to_markdown()
+
     # --- フィードバックの変換 ---
 
     def convert_pending_feedback(self, project_name: str) -> list[Story]:

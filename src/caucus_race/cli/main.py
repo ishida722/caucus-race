@@ -1,4 +1,6 @@
 import logging
+import signal
+from datetime import datetime
 from functools import cache
 from pathlib import Path
 from typing import Annotated, Any
@@ -6,14 +8,19 @@ from typing import Annotated, Any
 import typer
 from injector import Injector
 
+from caucus_race.adapter.notifier.channels import HistoryNotifier
 from caucus_race.container import build_injector
 from caucus_race.domain.entities import Feedback, Project, Spike, Story, Task
 from caucus_race.domain.errors import DomainError
 from caucus_race.domain.status import Author, SpikeStatus, SprintStatus
 from caucus_race.orchestrator import Orchestrator
+from caucus_race.port.notifier import HumanActionRequired, Notifier
 from caucus_race.port.planner import PlannerError
 from caucus_race.port.repository import Repository
 from caucus_race.port.workspace import WorkspaceError
+from caucus_race.runner import RunLock, runner_argv, spawn_detached
+from caucus_race.runner import stop as stop_run
+from caucus_race.settings import Settings
 from caucus_race.usecase.ai_planning import AIPlanningService
 from caucus_race.usecase.common import (
     latest_sprint,
@@ -277,10 +284,15 @@ def sprint_show(project: str) -> None:
 
 
 @sprint_app.command("approve")
-def sprint_approve(project: str) -> None:
+def sprint_approve(
+    project: str,
+    start: Annotated[bool, typer.Option("--start", help="承認後、バックグラウンドで開始する")] = False,
+) -> None:
     """スプリント計画を承認する。"""
     sprint = get(PlanningService).approve(project)
     typer.echo(f"スプリント #{sprint.number} を承認しました")
+    if start:
+        sprint_start(project, detach=True)
 
 
 @sprint_app.command("reject")
@@ -290,27 +302,105 @@ def sprint_reject(project: str, comment: Annotated[str, typer.Option("--comment"
     typer.echo(f"スプリント #{sprint.number} を差し戻しました")
 
 
-def _run(sprint_id: str) -> None:
-    sprint = get(Orchestrator).run(sprint_id)
+DetachOpt = Annotated[
+    bool, typer.Option("--detach", "-D", help="バックグラウンドで実行する（ログは CAUCUS_HOME/logs）")
+]
+
+
+def _lock(project: str) -> RunLock:
+    return RunLock(get(Settings).run_dir, project)
+
+
+def _run_foreground(project: str, log_path: Path | None = None) -> None:
+    """ロックを取ってスプリントを最後まで実行する。
+
+    SIGTERM で止められる。実行中だったストーリーは resume で再実行される。
+    """
+
+    def _terminate(signum: int, _frame: object) -> None:
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _terminate)
+    with _lock(project).hold(log_path):
+        r = repo()
+        sprint = require_open_sprint(r, project_by_name(r, project))
+        if sprint.status != SprintStatus.ACTIVE:
+            raise DomainError(f"スプリント #{sprint.number} は実行中ではありません（{sprint.status}）")
+        try:
+            sprint = get(Orchestrator).run(sprint.id)
+        except Exception as e:
+            get(Notifier).notify(  # type: ignore[type-abstract]
+                HumanActionRequired(
+                    kind="runner_error",
+                    project=project,
+                    message=f"スプリント #{sprint.number} の実行が止まりました: {e}",
+                )
+            )
+            raise
     typer.echo(f"スプリント #{sprint.number} は {sprint.status} になりました")
 
 
+def _run(project: str, detach: bool) -> None:
+    if not detach:
+        _run_foreground(project)
+        return
+    lock = _lock(project)
+    if (info := lock.running()) is not None:
+        raise DomainError(f"このプロジェクトのスプリントは既に実行中です（pid {info.pid}）")
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    log_path = get(Settings).log_dir / f"{project}-{stamp}.log"
+    pid = spawn_detached(runner_argv(project, log_path), log_path)
+    typer.echo(f"バックグラウンドで実行しています（pid {pid}）")
+    typer.echo(f"ログ: {log_path}")
+
+
 @sprint_app.command("start")
-def sprint_start(project: str) -> None:
+def sprint_start(project: str, detach: DetachOpt = False) -> None:
     """スプリントを開始し、ストーリーを順に実行する。"""
+    if (info := _lock(project).running()) is not None:
+        raise DomainError(f"このプロジェクトのスプリントは既に実行中です（pid {info.pid}）")
     sprint = get(SprintService).start(project)
     typer.echo(f"スプリント #{sprint.number} を開始しました（{sprint.branch}）")
-    _run(sprint.id)
+    _run(project, detach)
 
 
 @sprint_app.command("resume")
-def sprint_resume(project: str) -> None:
+def sprint_resume(project: str, detach: DetachOpt = False) -> None:
     """停止したスプリントの実行を再開する。"""
-    r = repo()
-    sprint = require_open_sprint(r, project_by_name(r, project))
-    if sprint.status != SprintStatus.ACTIVE:
-        raise DomainError(f"スプリント #{sprint.number} は実行中ではありません（{sprint.status}）")
-    _run(sprint.id)
+    _run(project, detach)
+
+
+@sprint_app.command("run", hidden=True)
+def sprint_run(
+    project: str, log: Annotated[Path | None, typer.Option("--log", help="ログの保存先（表示用）")] = None
+) -> None:
+    """（内部用）スプリントを実行する。--detach で起動されたプロセスが呼ぶ。"""
+    _run_foreground(project, log)
+
+
+@sprint_app.command("stop")
+def sprint_stop(project: str) -> None:
+    """バックグラウンドで実行中のスプリントを止める。実行中だったストーリーは resume で再実行される。"""
+    info = _lock(project).running()
+    if info is None:
+        raise DomainError(f"{project} のスプリントは実行されていません")
+    stop_run(info)
+    typer.echo(f"停止を指示しました（pid {info.pid}）。再開するには caucus sprint resume {project}")
+
+
+@sprint_app.command("logs")
+def sprint_logs(project: str, lines: Annotated[int, typer.Option("--lines", "-n")] = 40) -> None:
+    """実行中（または直近）のスプリントのログの末尾を表示する。"""
+    info = _lock(project).running()
+    log_path = info.log_path if info and info.log_path else None
+    if log_path is None:
+        candidates = sorted(get(Settings).log_dir.glob(f"{project}-*.log"))
+        log_path = candidates[-1] if candidates else None
+    if log_path is None or not log_path.exists():
+        raise DomainError(f"{project} のログがありません")
+    typer.echo(f"==> {log_path}")
+    for line in log_path.read_text(encoding="utf-8").splitlines()[-lines:]:
+        typer.echo(line)
 
 
 # --- task ---
@@ -421,9 +511,12 @@ def spike_drop(spike_id: str, reason: Annotated[str, typer.Option("--reason")] =
 
 
 @review_app.command("show")
-def review_show(project: str) -> None:
-    """レビュー資料を生成して表示する。"""
-    path, text = get(ReviewService).report(project)
+def review_show(
+    project: str,
+    regenerate: Annotated[bool, typer.Option("--regenerate", help="確認手順を AI に書き直させる")] = False,
+) -> None:
+    """レビュー資料を生成して表示する。AI プランナーが設定されていれば確認手順も載せる。"""
+    path, text = get(ReviewService).report(project, regenerate_guide=regenerate)
     typer.echo(text)
     typer.echo(f"（保存先: {path}）")
 
@@ -503,5 +596,25 @@ def status() -> None:
             todo.append("計画の承認")
         if sprint.status == SprintStatus.REVIEW:
             todo.append("スプリントレビュー")
+        running = _lock(p.name).running()
+        if sprint.status == SprintStatus.ACTIVE:
+            state = f"実行中（pid {running.pid}）" if running else "停止中（caucus sprint resume で再開）"
+            todo_or_state = f"  {state}"
+        else:
+            todo_or_state = ""
         suffix = f"  要対応: {', '.join(todo)}" if todo else ""
-        typer.echo(f"{p.name}: スプリント #{sprint.number} [{sprint.status}] {sprint.goal}{suffix}")
+        typer.echo(
+            f"{p.name}: スプリント #{sprint.number} [{sprint.status}] {sprint.goal}{todo_or_state}{suffix}"
+        )
+
+
+@app.command("notifications")
+def notifications(limit: Annotated[int, typer.Option("--limit", "-n")] = 20) -> None:
+    """最近の通知を表示する。"""
+    history = HistoryNotifier(get(Settings).data_dir / "notifications.jsonl")
+    for record in history.read(limit):
+        typer.echo(f"{record['at'][:19]} [{record['kind']}] {record['project']}: {record['message']}")
+
+
+if __name__ == "__main__":
+    main()
