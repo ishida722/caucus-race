@@ -14,12 +14,9 @@
 
 import itertools
 import tempfile
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from unittest import mock
 
 import pytest
 
@@ -52,19 +49,6 @@ SPIKE_STATUSES = ["open", "answered", "dropped"]
 FIXED_NOW = datetime(2026, 11, 23, 12, 0, 0)
 
 
-class _FixedClock:
-    @staticmethod
-    def now() -> datetime:
-        return FIXED_NOW
-
-
-@contextmanager
-def fixed_time() -> Iterator[None]:
-    """ログのファイル名に入る時刻を固定する（同じ秒に起動した場合を作る）。"""
-    with mock.patch("caucus_race.runner.datetime", _FixedClock):
-        yield
-
-
 # --- 例ごとに別のプロジェクトを作る ---
 
 _names = itertools.count()
@@ -89,8 +73,9 @@ def refine_launch(project_name: str, story_id: str) -> tuple[Path, Path, list[li
     tmp = Path(tempfile.mkdtemp())
     log_dir = tmp / "logs"
     spawn = FakeSpawn()
-    with fixed_time():
-        launched = BackgroundRunner(tmp / "run", log_dir, spawn).start_refine(project_name, story_id)
+    # 時刻（プロセス境界）を固定し、同じ秒に起動した場合を作る
+    runner = BackgroundRunner(tmp / "run", log_dir, spawn, clock=lambda: FIXED_NOW)
+    launched = runner.start_refine(project_name, story_id)
     launched.log_path.parent.mkdir(parents=True, exist_ok=True)
     launched.log_path.touch()  # ファイル名が長すぎる・不正なら OSError になる
     return log_dir, launched.log_path, [argv for argv, _ in spawn.calls]

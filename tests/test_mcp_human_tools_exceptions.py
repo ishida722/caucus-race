@@ -308,21 +308,22 @@ def test_XH21_answer_already_answered_spike_raises_and_keeps_first_answer(env: E
     assert env.spawn.calls == []
 
 
-def test_XH33_answer_spike_refine_launch_failure_raises_domain_error_with_original_cause(env: Env) -> None:
+def test_XH33_answer_spike_refine_launch_failure_returns_recorded_answer_with_reason(env: Env) -> None:
     """AI プランナーが設定済みで最後のスパイクに回答し、見直しのプロセスを起動できないとき
-    （ログのディレクトリを作れない）、OSError ではなく
-    DomainError「プロセスを起動できませんでした」（元の理由を含む）になり、
-    元の OSError が原因として残ること（受け入れ条件: ドメインのエラーは日本語のツールエラーとして返る）。
-    回答を記録したまま残すか取り消すかは仕様不明のため確かめない。"""
+    （ログのディレクトリを作れない）、OSError を漏らさず、エラーにもしない
+    （回答は記録済みのため。エラーにするとエージェントが再試行して「回答待ちではありません」になる）。回答は決定事項に残り、返り値は
+    refine_started が False で、起動できなかったことと元の理由をメッセージで伝えること。"""
     story = put_sprint_in(env, "planning")
     assert story is not None
     spike = env.planning.add_spike(story.id, "並び順は？")
     use_real_spawn_with_unwritable_log_dir(env)
 
-    with pytest.raises(DomainError, match=r"プロセスを起動できませんでした: .*logs") as excinfo:
-        env.tools.answer_spike(spike.id, "新しい順")
+    result = env.tools.answer_spike(spike.id, "新しい順")
 
-    assert isinstance(excinfo.value.__cause__, OSError)
+    assert env.repo.get(Spike, spike.id).status == SpikeStatus.ANSWERED
+    assert any("新しい順" in d for d in env.repo.get(Story, story.id).decisions)
+    assert result.refine_started is False
+    assert re.search(r"起動できませんでした（.*logs", result.message), result.message
 
 
 def test_XH22_list_spikes_of_unknown_project_raises_not_found(env: Env) -> None:
@@ -396,7 +397,10 @@ def test_XH27_complete_review_outside_review_raises_and_changes_nothing(env: Env
 
 
 class BrokenSpawn(FakeSpawn):
+    """起動しようとしたことを記録してから、想定外の例外を投げる。"""
+
     def __call__(self, argv: list[str], log_path: Path) -> int:
+        self.calls.append((argv, log_path))
         raise RuntimeError("起動器の不具合")
 
 
@@ -488,10 +492,12 @@ def test_XH29_rule_violation_reaches_agent_as_tool_error_with_japanese_message(
 
 
 def test_XH30_unexpected_error_becomes_tool_error_and_server_keeps_serving(env: Env) -> None:
-    """MCP のツールとして呼んで想定外の例外が起きたとき、isError の結果が返り、サーバーは止まらず、
-    続けて呼んだツールは動くこと。"""
+    """MCP のツールとして resume_sprint を呼び、その中の実行プロセスの起動で想定外の例外が起きたとき、
+    isError の結果が返り、サーバーは止まらず、続けて呼んだツールは動くこと。
+    起動を 1 回だけ試みた（resume_sprint が実際に呼ばれ、別のツールに入れ替わっていない）ことも確かめる。"""
     put_sprint_in(env, "active")
-    env.injector.get(BackgroundRunner).spawn = BrokenSpawn()
+    broken = BrokenSpawn()
+    env.injector.get(BackgroundRunner).spawn = broken
 
     async def body(c: Client) -> tuple[CallToolResult, CallToolResult]:
         failed = await c.call_tool("resume_sprint", {"project": P})
@@ -501,7 +507,10 @@ def test_XH30_unexpected_error_becomes_tool_error_and_server_keeps_serving(env: 
     failed, listed = with_client(env, body)
 
     assert failed.is_error is True
+    assert "Traceback" not in text(failed)
+    assert len(broken.calls) == 1
     assert listed.is_error is not True
+    assert listed.structured_content == {"result": []}
 
 
 # --- CLI（切り出した処理の例外が、CLI に以前と同じ形で伝わること） ---

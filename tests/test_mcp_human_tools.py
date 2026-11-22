@@ -55,25 +55,22 @@ JUDGMENT_TOOLS = [
 REFERENCE_TOOLS = ["list_spikes", "get_review", "get_plan_status"]
 
 
-def _finished_pid() -> int:
-    """終了済み（回収済み）のプロセスの pid。偽の起動が返す pid に、無関係な生きたプロセスを使わないため。"""
-    proc = subprocess.Popen([sys.executable, "-c", ""])
-    proc.wait()
-    return proc.pid
-
-
-FINISHED_PID = _finished_pid()
+# OS が割り当てることのない pid（pid_t の最大値。Linux の pid_max は最大 2^22、macOS は 99998）。
+# 偽の起動はこの pid を返す。終了済みのプロセスの pid を使うと、テスト中に OS が再利用したときに、起動直後の
+# 実行中の印（BackgroundRunner._launching）が生きたプロセスとみなして、テストが不安定になるため
+NEVER_ASSIGNED_PID = 2**31 - 1
 
 
 @dataclass
 class FakeSpawn:
     """プロセスの起動の代わり。起動しようとした argv とログの保存先を記録し、pid を返す。
 
-    返す pid は終了済みのプロセスのもの。BackgroundRunner は起動した pid が生きている間を
-    「起動直後の実行中」とみなすため、偽の起動では「起動したプロセスがすぐにロックを取り、終わった」扱いになる。
+    返す pid は OS が割り当てることのない値（存在しないプロセス）。
+    BackgroundRunner は起動した pid が生きている間を「起動直後の実行中」とみなすため、
+    偽の起動では「起動したプロセスがすぐにロックを取り、終わった」扱いになる。
     """
 
-    pid: int = FINISHED_PID
+    pid: int = NEVER_ASSIGNED_PID
     calls: list[tuple[list[str], Path]] = field(default_factory=list)
 
     def __call__(self, argv: list[str], log_path: Path) -> int:

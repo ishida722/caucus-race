@@ -127,7 +127,9 @@ claude mcp add caucus-race -e CAUCUS_HOME=/path/to/home -- caucus mcp
 
 - `start_sprint` と `resume_sprint` は常にバックグラウンドで実行し、完了を待たずにスプリント番号・ブランチ・pid・ログの保存先を返す。進み具合は `caucus status` や `caucus sprint logs` で確認する
 - 既に実行中のスプリントの開始・再開と、実行中でないスプリントの停止はエラーになる（二重には起動しない）
-- `answer_spike` で、AI プランナーが設定されていてストーリーの未解決のスパイクがなくなった場合は、ストーリーの見直し（`caucus plan refine` 相当）をバックグラウンドで始め、完了を待たずに返る（`refine_started: true`）。ログは `CAUCUS_HOME/logs/refine/` に出る
+- `answer_spike` で、AI プランナーが設定されていてストーリーの未解決のスパイクがなくなった場合は、ストーリーの見直し（`caucus plan refine` 相当）をバックグラウンドで始め、完了を待たずに返る（`refine_started: true`）。ログは `CAUCUS_HOME/logs/refine/` に出る。見直しのプロセスを起動できなかった場合も回答は記録され、`refine_started: false` と、起動できなかった理由をメッセージで返す
+- AI プランナーがスプリント計画を作成中（`plan_sprint` の実行中）は、`approve_plan`・`reject_plan` はエラーになる（完了時に AI の計画で置き換わるため）。`answer_spike` は回答だけを記録し、見直しは始めない（作成中の計画に回答が反映される）
+- `start_sprint` でスプリントを開始した後に実行プロセスを起動できなかった場合、スプリントは開始済みのまま残る。原因を取り除いてから `resume_sprint` で再開する
 - `get_review` は、AI プランナーが設定されていると初回は確認手順を AI に書かせるため数分かかることがある。`complete_review` も、未変換のフィードバックを AI が変換するため時間がかかることがある
 
 ## 開発

@@ -148,6 +148,15 @@ def real_planner_tools(env: Env) -> HumanTools:
 # --- I. start_sprint(project) ---
 
 
+def start_rejection_reason(state: str, lock: str) -> str:
+    """start_sprint を拒否する理由（I1〜I30 の表）。実行中かどうかを、スプリントの状態より先に確かめる。"""
+    if lock in RUNNING_LOCKS:
+        return "既に実行中"
+    if state in ("none", "closed"):
+        return "進行中のスプリントがありません"
+    return "承認されていません"  # R-2
+
+
 @pytest.mark.parametrize("lock", LOCK_STATES)
 @pytest.mark.parametrize("state", STATES)
 def test_I1_30_start_sprint_launches_only_when_approved_and_not_running(
@@ -155,8 +164,8 @@ def test_I1_30_start_sprint_launches_only_when_approved_and_not_running(
 ) -> None:
     """S × R の直積（I1〜I30）: 承認済みで、P が実行中でない（ロックなし・前回のロックファイルだけ残る・
     別のプロジェクトだけ実行中）ときだけ、スプリントを開始して実行プロセスを起動すること。
-    それ以外（pid が読めないロックも実行中とみなす）は例外になり、
-    状態は変わらず、プロセスを起動しないこと。"""
+    それ以外（pid が読めないロックも実行中とみなす）は、拒否の理由（既に実行中・進行中のスプリントがない・
+    承認されていない）を含む例外になり、状態は変わらず、プロセスを起動しないこと。"""
     put_sprint_in(env, state)
     before = sprint_state(env)
 
@@ -168,7 +177,7 @@ def test_I1_30_start_sprint_launches_only_when_approved_and_not_running(
             assert (result.pid, result.log_path) == (env.spawn.pid, str(log_path))
             assert sprint_state(env)[0] == SprintStatus.ACTIVE
         else:
-            with pytest.raises(DomainError):
+            with pytest.raises(DomainError, match=start_rejection_reason(state, lock)):
                 env.tools.start_sprint(P)
             assert sprint_state(env) == before
             assert env.spawn.calls == []
@@ -184,7 +193,7 @@ def test_I31_start_sprint_with_open_spike_fails_without_launching(env: Env) -> N
     env.planning.add_spike(story.id, "並び順は？")
     env.planning.approve(P)
 
-    with pytest.raises(DomainError):
+    with pytest.raises(DomainError, match="未解決のスパイクがあるため開始できません"):
         env.tools.start_sprint(P)
 
     assert sprint_state(env)[0] == SprintStatus.APPROVED
@@ -192,25 +201,11 @@ def test_I31_start_sprint_with_open_spike_fails_without_launching(env: Env) -> N
 
 
 def test_I32_start_sprint_of_missing_project_fails_without_launching(env: Env) -> None:
-    """存在しないプロジェクトを指定したとき、例外になり、プロセスを起動しないこと。"""
-    with pytest.raises(DomainError):
+    """存在しないプロジェクトを指定したとき、例外「プロジェクト nope が見つかりません」になり、
+    プロセスを起動しないこと。"""
+    with pytest.raises(DomainError, match="プロジェクト nope が見つかりません"):
         env.tools.start_sprint("nope")
     assert env.spawn.calls == []
-
-
-class OSErrorSpawn(FakeSpawn):
-    def __call__(self, argv: list[str], log_path: Path) -> int:
-        raise OSError("起動できない")
-
-
-def test_I33_start_sprint_when_spawn_fails_raises_domain_error(env: Env) -> None:
-    """承認済み・実行中でないが、プロセスの起動に失敗したとき（OSError）、トレースバックになる例外ではなく
-    DomainError（ツールエラー）になること。開始後のスプリントの状態は仕様不明のため確かめない。"""
-    put_sprint_in(env, "approved")
-    env.injector.get(BackgroundRunner).spawn = OSErrorSpawn()
-
-    with pytest.raises(DomainError):
-        env.tools.start_sprint(P)
 
 
 # --- J. resume_sprint(project) ---
@@ -804,46 +799,10 @@ def test_Q15_complete_review_with_manual_planner_still_converts_feedback(env: En
 # --- R. BackgroundRunner.start_refine(project_name, story_id) ---
 
 
-@pytest.mark.parametrize(
-    "project_name",
-    [
-        pytest.param("demo", id="R1-ascii"),
-        pytest.param("記事 サイト", id="R2-non-ascii-with-space"),
-        pytest.param("../escape", id="R3-parent-dir"),
-        pytest.param("a/b", id="R4-slash"),
-    ],
-)
-def test_R1_4_refine_log_stays_directly_under_refine_dir(tmp_path: Path, project_name: str) -> None:
-    """プロジェクト名がどんな文字を含んでも、見直しのログは CAUCUS_HOME/logs/refine/ の直下に作られ
-    （README の記載）、起動するのはそのストーリーの見直しであること。"""
-    spawn = FakeSpawn()
-    log_dir = tmp_path / "logs"
-    runner = BackgroundRunner(tmp_path / "run", log_dir, spawn)
-
-    launched = runner.start_refine(project_name, "ST-1")
-
-    [(argv, log_path)] = spawn.calls
-    assert argv == refine_argv("ST-1")
-    assert log_path == launched.log_path
-    assert log_path.parent == log_dir / "refine"
-
-
-@pytest.mark.parametrize(
-    "story_id",
-    [
-        pytest.param("a/b", id="R5-story-id-with-slash"),
-        pytest.param("../x", id="R6-story-id-with-parent-dir"),
-    ],
-)
-def test_R5_6_refine_log_stays_under_refine_dir_for_any_story_id(tmp_path: Path, story_id: str) -> None:
-    """ストーリーの ID に `/` や `..` が含まれても、見直しのログは logs/refine/ の直下に作られること。"""
-    spawn = FakeSpawn()
-    log_dir = tmp_path / "logs"
-    runner = BackgroundRunner(tmp_path / "run", log_dir, spawn)
-
-    launched = runner.start_refine(P, story_id)
-
-    assert launched.log_path.parent == log_dir / "refine"
+# R1〜R6（プロジェクト名・ストーリーの ID に `/`・`..`・非 ASCII・長い名前を含めても、
+# 見直しのログは logs/refine/ の直下にできる）は、プロパティテストの PH1 の例
+# （tests/test_mcp_human_tools_property_examples.py）と同じ入力・同じ性質だったため、
+# そちらに統合した。ここには、起動するコマンドを本物の CLI で確かめる R7 だけを残す。
 
 
 def test_R7_refine_command_receives_story_id_starting_with_dash_as_story_id(tmp_path: Path) -> None:

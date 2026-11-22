@@ -6,6 +6,7 @@
 モックするのはプロセスの起動（spawn）だけ（tests/test_mcp_human_tools.py の FakeSpawn）。
 """
 
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,7 @@ from tests.test_mcp_human_tools import MANUAL, Env, FakeSpawn, P
 
 # 多くのファイルシステム（APFS・ext4）の、1 つのファイル名の長さの上限（バイト）
 NAME_MAX = 255
+FIXED_NOW = datetime(2026, 11, 23, 12, 0, 0)
 
 
 @pytest.fixture
@@ -216,13 +218,12 @@ def test_HB20_refine_logs_of_different_project_names_never_collide(
     """長さだけが 1 文字ずつ違うプロジェクト名（ファイル名の上限をまたぐ前後で、先頭が共通になるもの）を
     同じストーリー・同じ時刻で起動しても、見直しのログのファイル名がすべて別になること
     （別のプロジェクトのログを同じファイルに混ぜない）。"""
-    runner = BackgroundRunner(tmp_path / "run", tmp_path / "logs", FakeSpawn())
+    # 時刻（プロセス境界）を固定し、すべて同じ秒に起動した扱いにする
+    runner = BackgroundRunner(tmp_path / "run", tmp_path / "logs", FakeSpawn(), clock=lambda: FIXED_NOW)
 
     names = {runner.start_refine(char * length, "ST-1").log_path.name for length in range(1, max_len + 1)}
 
-    # ファイル名には秒の精度の時刻が入るため、時刻の部分を除いて比べる（同じ秒で起動した扱いにする）
-    stems = {name.rsplit("-", 2)[0] for name in names}
-    assert len(stems) == max_len
+    assert len(names) == max_len
 
 
 def test_HB21_refine_log_fits_name_max_for_project_name_far_over_the_limit(tmp_path: Path) -> None:

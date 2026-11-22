@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from caucus_race.domain.entities import Project, Spike, Story
 from caucus_race.domain.errors import DomainError
 from caucus_race.domain.status import SpikeStatus, SprintStatus
+from caucus_race.plan_job import PlanJobs
 from caucus_race.port.repository import Repository
 from caucus_race.runner import BackgroundRunner, Launched
 from caucus_race.usecase.common import project_by_name, require_open_sprint, story_to_refine
@@ -95,12 +96,26 @@ class HumanTools:
         sprints: SprintService,
         review: ReviewService,
         runner: BackgroundRunner,
+        jobs: PlanJobs,
     ) -> None:
         self.repo = repo
         self.planning = planning
         self.sprints = sprints
         self.review = review
         self.runner = runner
+        self.jobs = jobs
+
+    def _ensure_not_planning(self, project_name: str) -> None:
+        """AI が計画を作成している間は、計画を承認・差し戻しさせない。
+
+        完了時に AI の計画で置き換わるため、作成中の承認は置き換えられる計画を承認することになり、
+        作成中の差し戻しコメントは黙って消える（planning_tools の計画を変更するツールと同じ扱い）。
+        """
+        if self.jobs.running(project_name):
+            raise DomainError(
+                f"{project_name} は AI がスプリント計画を作成中のため変更できません。"
+                " get_plan_status で完了を確認してから操作してください"
+            )
 
     def _launch(self, launch: Callable[[], Launched]) -> Launched:
         try:
@@ -145,7 +160,29 @@ class HumanTools:
         if target is None:
             return result
         project_name = self.repo.get(Project, target.project_id).name
-        launched = self._launch(lambda: self.runner.start_refine(project_name, target.id))
+        if self.jobs.running(project_name):
+            # 計画ジョブと同じストーリーを並行して書き換えない。計画ジョブは最新の決定事項を使って計画を作る
+            return result.model_copy(
+                update={
+                    "message": (
+                        f"{result.message}。AI がスプリント計画を作成中のため、{target.id} の見直しは"
+                        "始めませんでした（作成中の計画に回答が反映されます）"
+                    )
+                }
+            )
+        try:
+            launched = self.runner.start_refine(project_name, target.id)
+        except OSError as e:
+            # 回答は記録済み。エラーにすると、エージェントが再試行して「回答待ちではありません」になる
+            return result.model_copy(
+                update={
+                    "message": (
+                        f"{result.message}。ただし {target.id} の見直しのプロセスを"
+                        f"起動できませんでした（{e}）。"
+                        f"原因を取り除いてから caucus plan refine {target.id} で見直してください"
+                    )
+                }
+            )
         return result.model_copy(
             update={
                 "refine_started": True,
@@ -161,6 +198,7 @@ class HumanTools:
     # --- 計画の承認・差し戻し ---
 
     def approve_plan(self, project: str) -> PlanDecisionResult:
+        self._ensure_not_planning(project)
         sprint = self.planning.approve(project)
         return PlanDecisionResult(
             project=project,
@@ -172,6 +210,7 @@ class HumanTools:
     def reject_plan(self, project: str, comment: str) -> PlanDecisionResult:
         if not comment.strip():
             raise DomainError("差し戻しにはコメントが必要です")
+        self._ensure_not_planning(project)
         sprint = self.planning.reject(project, comment)
         return PlanDecisionResult(
             project=project,
@@ -185,7 +224,13 @@ class HumanTools:
     def start_sprint(self, project: str) -> SprintRunResult:
         self.runner.ensure_not_running(project)
         sprint = self.sprints.start(project)
-        launched = self._launch(lambda: self.runner.start_run(project))
+        try:
+            launched = self.runner.start_run(project)
+        except OSError as e:
+            raise DomainError(
+                f"スプリント #{sprint.number} は開始しましたが、実行プロセスを起動できませんでした: {e}。"
+                "原因を取り除いてから resume_sprint で実行を再開してください"
+            ) from e
         return SprintRunResult(
             project=project,
             sprint_number=sprint.number,

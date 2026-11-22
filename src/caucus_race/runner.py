@@ -138,10 +138,17 @@ class BackgroundRunner:
     spawn はプロセスの起動（プロセス境界）。テストでは差し替える。
     """
 
-    def __init__(self, run_dir: Path, log_dir: Path, spawn: Spawn = spawn_detached) -> None:
+    def __init__(
+        self,
+        run_dir: Path,
+        log_dir: Path,
+        spawn: Spawn = spawn_detached,
+        clock: Callable[[], datetime] = datetime.now,
+    ) -> None:
         self.run_dir = run_dir
         self.log_dir = log_dir
         self.spawn = spawn
+        self.clock = clock  # ログのファイル名に入れる時刻（プロセス境界。テストで差し替える）
 
     def lock(self, project_name: str) -> RunLock:
         return RunLock(self.run_dir, project_name)
@@ -159,12 +166,24 @@ class BackgroundRunner:
         「実行中でない」に見える。その間に開始・再開をもう一度受け付けると二重に起動してしまうため、
         起動した pid を印のファイルに残し、そのプロセスが生きている間は実行中とみなす。
         プロセスが終われば（ロックを取れずに終わった場合も）印は無視される。
+
+        起動の後に実行ロックが取られた（ロックファイルが印より後に更新された）なら、起動したプロセスはもうロックを
+        取ったか、取って終わっている。その後に印の pid が別のプロセスに再利用されても実行中とみなさないよう、
+        その印は無効として消す（RunLock はロックを取るときと手放すときにロックファイルを書き換える）。
         """
+        marker = self._launch_marker(project_name)
         try:
-            pid = int(self._launch_marker(project_name).read_text(encoding="utf-8").strip())
+            pid = int(marker.read_text(encoding="utf-8").strip())
+            marked_at = marker.stat().st_mtime_ns
         except OSError, ValueError:
             return None
-        if pid <= 0:
+        lock_path = self.lock(project_name).path
+        try:
+            locked_after_launch = lock_path.stat().st_mtime_ns > marked_at
+        except OSError:
+            locked_after_launch = False
+        if locked_after_launch or pid <= 0:
+            marker.unlink(missing_ok=True)
             return None
         try:
             os.kill(pid, 0)
@@ -186,7 +205,7 @@ class BackgroundRunner:
         既に実行中（起動直後でロックを取る前を含む）なら DomainError。
         """
         self.ensure_not_running(project_name)
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        stamp = self.clock().strftime("%Y%m%d-%H%M%S")
         log_path = self.log_dir / f"{project_name}-{stamp}.log"
         pid = self.spawn(runner_argv(project_name, log_path), log_path)
         marker = self._launch_marker(project_name)
@@ -213,7 +232,7 @@ class BackgroundRunner:
         ログは log_dir/refine/ に置く（`caucus sprint logs` が拾う、log_dir 直下の
         スプリントのログと混ぜない）。
         """
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        stamp = self.clock().strftime("%Y%m%d-%H%M%S")
         log_path = self.log_dir / "refine" / f"{file_stem(project_name)}-{file_stem(story_id)}-{stamp}.log"
         pid = self.spawn(refine_argv(story_id), log_path)
         return Launched(pid=pid, log_path=log_path)
