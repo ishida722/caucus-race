@@ -7,10 +7,20 @@ AI エージェントによるスプリント開発のオーケストレータ�
 
 ## セットアップ
 
+`caucus` コマンドとして使う場合は、editable モードで uv tool にインストールする。ソースの変更はそのまま反映される。
+
 ```bash
-uv sync
-uv run caucus --help
+uv tool install --editable ~/orca/projects/caucus-race
+caucus --help
 ```
+
+依存パッケージやコマンドの定義（`pyproject.toml`）を変えたときは、入れ直す。
+
+```bash
+uv tool install --editable --reinstall ~/orca/projects/caucus-race
+```
+
+開発用には `uv sync` してから `uv run caucus ...` でも動く。
 
 データは `~/.local/share/caucus-race/` に保存する（環境変数 `CAUCUS_HOME` で変更できる）。
 
