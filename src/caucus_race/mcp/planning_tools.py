@@ -12,7 +12,7 @@ from injector import inject
 from pydantic import BaseModel, Field
 
 from caucus_race.domain.entities import Project, Spike, Sprint, Story, Task
-from caucus_race.domain.errors import DomainError, NotFoundError
+from caucus_race.domain.errors import DomainError
 from caucus_race.domain.status import SpikeStatus
 from caucus_race.plan_job import PlanJobs, PlanJobState
 from caucus_race.port.planner import PlannerError
@@ -24,7 +24,7 @@ from caucus_race.usecase.planning import PlanningService
 from caucus_race.usecase.project import BacklogService
 
 # 利用者（エージェント）に理由を見せるエラー。CLI の「エラー: ...」と同じ型
-USER_ERRORS = (NotFoundError, WorkspaceError, PlannerError)  # ミュータント: ルール違反を変換しない
+USER_ERRORS = (DomainError, WorkspaceError, PlannerError)
 
 
 @dataclass(frozen=True)
