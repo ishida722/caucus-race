@@ -11,8 +11,10 @@ from caucus_race.domain.entities import Feedback, Project, Spike, Story, Task
 from caucus_race.domain.errors import DomainError
 from caucus_race.domain.status import Author, SpikeStatus, SprintStatus
 from caucus_race.orchestrator import Orchestrator
+from caucus_race.port.planner import PlannerError
 from caucus_race.port.repository import Repository
 from caucus_race.port.workspace import WorkspaceError
+from caucus_race.usecase.ai_planning import AIPlanningService
 from caucus_race.usecase.common import (
     latest_sprint,
     open_spikes,
@@ -34,6 +36,7 @@ spike_app = typer.Typer(no_args_is_help=True, help="スパイク")
 review_app = typer.Typer(no_args_is_help=True, help="スプリントレビュー")
 feedback_app = typer.Typer(no_args_is_help=True, help="フィードバック")
 retro_app = typer.Typer(no_args_is_help=True, help="レトロスペクティブ")
+plan_app = typer.Typer(no_args_is_help=True, help="AI プランナー")
 for sub, name in [
     (project_app, "project"),
     (story_app, "story"),
@@ -43,6 +46,7 @@ for sub, name in [
     (review_app, "review"),
     (feedback_app, "feedback"),
     (retro_app, "retro"),
+    (plan_app, "plan"),
 ]:
     app.add_typer(sub, name=name)
 
@@ -66,7 +70,7 @@ def main() -> None:
     )
     try:
         app()
-    except (DomainError, WorkspaceError) as e:
+    except (DomainError, WorkspaceError, PlannerError) as e:
         typer.secho(f"エラー: {e}", fg=typer.colors.RED, err=True)
         raise SystemExit(1) from e
 
@@ -83,6 +87,18 @@ WorkflowOpt = Annotated[str | None, typer.Option("--workflow", help="vuoi のワ
 TestCommandOpt = Annotated[
     list[str] | None, typer.Option("--test-command", help="vuoi に渡すテストコマンド（複数可）")
 ]
+
+PlannerOpt = Annotated[str | None, typer.Option("--planner", help="プランナーの種類（manual / claude）")]
+ModelOpt = Annotated[str | None, typer.Option("--model", help="プランナーが使う Claude のモデル")]
+
+
+def _planner_config(planner: str | None, model: str | None) -> dict[str, Any]:
+    config: dict[str, Any] = {}
+    if planner is not None:
+        config["type"] = planner
+    if model is not None:
+        config["model"] = model
+    return config
 
 
 def _executor_config(
@@ -108,6 +124,8 @@ def project_add(
     executor: ExecutorOpt = "fake",
     workflow: WorkflowOpt = None,
     test_commands: TestCommandOpt = None,
+    planner: PlannerOpt = "manual",
+    model: ModelOpt = None,
 ) -> None:
     """プロジェクトを登録する。"""
     project = get(ProjectService).register(
@@ -117,6 +135,7 @@ def project_add(
         base_branch=base_branch,
         max_stories_per_sprint=max_stories,
         executor_config=_executor_config(executor, workflow, test_commands),
+        planner_config=_planner_config(planner, model),
     )
     typer.echo(f"{project.id} {project.name} を登録しました")
 
@@ -130,6 +149,8 @@ def project_set(
     executor: ExecutorOpt = None,
     workflow: WorkflowOpt = None,
     test_commands: TestCommandOpt = None,
+    planner: PlannerOpt = None,
+    model: ModelOpt = None,
 ) -> None:
     """プロジェクトの設定を変更する。指定した項目だけを更新する。"""
     project = get(ProjectService).configure(
@@ -138,9 +159,11 @@ def project_set(
         base_branch=base_branch,
         max_stories_per_sprint=max_stories,
         executor_config=_executor_config(executor, workflow, test_commands),
+        planner_config=_planner_config(planner, model),
     )
     typer.echo(
-        f"{project.name} を更新しました: base={project.base_branch} executor={project.executor_config}"
+        f"{project.name} を更新しました: base={project.base_branch} "
+        f"executor={project.executor_config} planner={project.planner_config}"
     )
 
 
@@ -338,10 +361,53 @@ def spike_list(project: str) -> None:
 
 
 @spike_app.command("answer")
-def spike_answer(spike_id: str, answer: str) -> None:
-    """スパイクに回答する。回答はストーリーの決定事項に追加される。"""
-    get(PlanningService).answer_spike(spike_id, answer)
+def spike_answer(
+    spike_id: str,
+    answer: str,
+    refine: Annotated[
+        bool, typer.Option("--refine/--no-refine", help="回答後に AI にタスクを見直させる")
+    ] = True,
+) -> None:
+    """スパイクに回答する。回答はストーリーの決定事項に追加される。
+
+    AI プランナーが設定されていて、ストーリーの未解決のスパイクがなくなった場合は、AI がタスクを見直す。
+    """
+    spike = get(PlanningService).answer_spike(spike_id, answer)
     typer.echo(f"{spike_id} に回答しました")
+    r = repo()
+    story = r.get(Story, spike.story_id)
+    project = r.get(Project, story.project_id)
+    remaining = r.query(Spike, story_id=story.id, status=SpikeStatus.OPEN)
+    if refine and not remaining and project.planner_config.get("type", "manual") != "manual":
+        typer.echo(f"AI が {story.id} を見直しています...")
+        get(AIPlanningService).refine(story.id)
+        typer.echo(f"{story.id} を見直しました（caucus story show {story.id}）")
+
+
+# --- plan（AI） ---
+
+
+@plan_app.command("sprint")
+def plan_sprint(project: str) -> None:
+    """AI にスプリント計画を作らせる。差し戻された計画があれば、コメントに従って作り直させる。"""
+    typer.echo("AI が計画を作成しています...")
+    sprint = get(AIPlanningService).plan(project)
+    typer.echo(f"スプリント #{sprint.number} の計画を作成しました")
+    sprint_show(project)
+
+
+@plan_app.command("refine")
+def plan_refine(story_id: str) -> None:
+    """スパイクの回答を踏まえて、AI にストーリーのタスクと受け入れ条件を見直させる。"""
+    get(AIPlanningService).refine(story_id)
+    story_show(story_id)
+
+
+@plan_app.command("feedback")
+def plan_feedback(project: str) -> None:
+    """レビュー中のフィードバックを AI にストーリーへ変換させる。"""
+    for story in get(AIPlanningService).convert_pending_feedback(project):
+        typer.echo(_story_line(story))
 
 
 @spike_app.command("drop")

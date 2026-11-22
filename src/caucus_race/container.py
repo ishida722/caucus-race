@@ -4,11 +4,14 @@ from caucus_race.adapter.executor.fake import FakeExecutor
 from caucus_race.adapter.executor.vuoi import VuoiConfig, VuoiExecutor
 from caucus_race.adapter.notifier.console import ConsoleNotifier
 from caucus_race.adapter.persistence.sqlite import SqliteRepository
+from caucus_race.adapter.planner.claude import ClaudePlanner, ClaudePlannerConfig
+from caucus_race.adapter.planner.manual import ManualPlanner
 from caucus_race.adapter.workspace.git import GitWorkspace
 from caucus_race.domain.entities import Project
 from caucus_race.domain.errors import DomainError
 from caucus_race.port.executor import Executor, ExecutorFactory
 from caucus_race.port.notifier import Notifier
+from caucus_race.port.planner import Planner, PlannerFactory
 from caucus_race.port.repository import Repository
 from caucus_race.port.workspace import Workspace
 from caucus_race.settings import Settings
@@ -29,6 +32,21 @@ class ConfiguredExecutorFactory:
                 raise DomainError(f"実行器 {kind} には対応していません")
 
 
+class ConfiguredPlannerFactory:
+    """`Project.planner_config["type"]` に応じてプランナーを選ぶ。"""
+
+    def for_project(self, project: Project) -> Planner:
+        kind = project.planner_config.get("type", "manual")
+        match kind:
+            case "manual":
+                return ManualPlanner()
+            case "claude":
+                options = {k: v for k, v in project.planner_config.items() if k != "type"}
+                return ClaudePlanner(project.repo_path, ClaudePlannerConfig.model_validate(options))
+            case _:
+                raise DomainError(f"プランナー {kind} には対応していません")
+
+
 class AppModule(Module):
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
@@ -39,6 +57,7 @@ class AppModule(Module):
         binder.bind(Workspace, to=GitWorkspace, scope=singleton)  # type: ignore[type-abstract]
         binder.bind(Notifier, to=ConsoleNotifier, scope=singleton)  # type: ignore[type-abstract]
         binder.bind(ExecutorFactory, to=ConfiguredExecutorFactory, scope=singleton)  # type: ignore[type-abstract]
+        binder.bind(PlannerFactory, to=ConfiguredPlannerFactory, scope=singleton)  # type: ignore[type-abstract]
 
 
 def build_injector(settings: Settings | None = None) -> Injector:

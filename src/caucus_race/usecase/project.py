@@ -24,6 +24,7 @@ class ProjectService:
         base_branch: str = "main",
         max_stories_per_sprint: int = 5,
         executor_config: dict[str, Any] | None = None,
+        planner_config: dict[str, Any] | None = None,
     ) -> Project:
         if not (repo_path / ".git").exists():
             raise DomainError(f"{repo_path} は git リポジトリではありません")
@@ -39,6 +40,7 @@ class ProjectService:
                     base_branch=base_branch,
                     max_stories_per_sprint=max_stories_per_sprint,
                     executor_config=executor_config or {"type": "fake"},
+                    planner_config=planner_config or {"type": "manual"},
                 )
             )
             record(self.repo, Actor.HUMAN, project, "project.registered")
@@ -52,8 +54,9 @@ class ProjectService:
         base_branch: str | None = None,
         max_stories_per_sprint: int | None = None,
         executor_config: dict[str, Any] | None = None,
+        planner_config: dict[str, Any] | None = None,
     ) -> Project:
-        """指定した項目だけを更新する。executor_config は既存の設定に上書きでマージする。"""
+        """指定した項目だけを更新する。executor_config / planner_config は既存の設定に上書きでマージする。"""
         with self.repo.transaction():
             project = project_by_name(self.repo, name)
             if description is not None:
@@ -64,6 +67,8 @@ class ProjectService:
                 project.max_stories_per_sprint = max_stories_per_sprint
             if executor_config:
                 project.executor_config = {**project.executor_config, **executor_config}
+            if planner_config:
+                project.planner_config = {**project.planner_config, **planner_config}
             self.repo.save(project)
             record(self.repo, Actor.HUMAN, project, "project.configured")
         return project

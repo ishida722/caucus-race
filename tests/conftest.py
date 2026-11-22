@@ -7,9 +7,11 @@ from injector import Binder, Injector, InstanceProvider, Module
 
 from caucus_race.adapter.executor.fake import FakeExecutor, SingleExecutorFactory
 from caucus_race.adapter.notifier.console import RecordingNotifier
+from caucus_race.adapter.planner.fake import FakePlanner, SinglePlannerFactory
 from caucus_race.container import AppModule
 from caucus_race.port.executor import ExecutorFactory
 from caucus_race.port.notifier import Notifier
+from caucus_race.port.planner import PlannerFactory
 from caucus_race.settings import Settings
 
 
@@ -33,14 +35,19 @@ def git_repo(tmp_path: Path) -> Path:
     return repo
 
 
-class TestModule(Module):
-    def __init__(self, executor: FakeExecutor, notifier: RecordingNotifier) -> None:
+class FakeAdaptersModule(Module):
+    def __init__(
+        self, executor: FakeExecutor, notifier: RecordingNotifier, planner: FakePlanner | None = None
+    ) -> None:
         self.executor = executor
         self.notifier = notifier
+        self.planner = planner
 
     def configure(self, binder: Binder) -> None:
         binder.bind(ExecutorFactory, to=InstanceProvider(SingleExecutorFactory(self.executor)))  # type: ignore[type-abstract]
         binder.bind(Notifier, to=InstanceProvider(self.notifier))  # type: ignore[type-abstract]
+        if self.planner is not None:
+            binder.bind(PlannerFactory, to=InstanceProvider(SinglePlannerFactory(self.planner)))  # type: ignore[type-abstract]
 
 
 @pytest.fixture
@@ -58,7 +65,7 @@ def make_injector(tmp_path: Path, notifier: RecordingNotifier) -> Callable[[Fake
     settings = Settings(data_dir=tmp_path / "data")
 
     def make(executor: FakeExecutor) -> Injector:
-        return Injector([AppModule(settings), TestModule(executor, notifier)])
+        return Injector([AppModule(settings), FakeAdaptersModule(executor, notifier)])
 
     return make
 

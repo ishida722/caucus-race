@@ -17,22 +17,27 @@ uv run caucus --help
 ## 使い方
 
 ```bash
-# プロジェクトを登録する（実行器に vuoi の dev ワークフローを使う）
-caucus project add myapp --repo ~/projects/myapp --executor vuoi --workflow dev \
-  --test-command "uv run pytest"
+# プロジェクトを登録する（実行器に vuoi の dev ワークフロー、プランナーに Claude を使う）
+caucus project add myapp --repo ~/projects/myapp -d "記事管理アプリ" \
+  --executor vuoi --workflow dev --test-command "uv run pytest" --planner claude
 
 # バックログにストーリーを積む
 caucus story add myapp "一覧画面を作る" -a "一覧が新しい順に表示される"
 
-# スプリントを計画する
+# AI にスプリントを計画させる（ストーリー選定・タスク分解・スパイクの洗い出し）
+caucus plan sprint myapp
+
+# AI を使わずに人間が計画する場合
 caucus sprint new myapp --goal "一覧画面で記事を探せる"
 caucus sprint add myapp ST-1
 caucus task add ST-1 "一覧 API を追加する"
 caucus spike add ST-1 "ページングは必要か" -o "必要" -o "不要"
 
-# 人間: スパイクに回答して計画を承認する
+# 人間: スパイクに回答して計画を承認する（回答後、AI がタスクを見直す）
+caucus spike list myapp
 caucus spike answer SP-1 "必要。20 件ずつ"
 caucus sprint approve myapp
+# 差し戻す場合: caucus sprint reject myapp -m "理由" → caucus plan sprint myapp
 
 # 実行する（caucus/sprint-1 ブランチを作り、ストーリーを順に vuoi に渡す）
 caucus sprint start myapp
@@ -41,7 +46,7 @@ caucus sprint resume myapp   # 途中で止まった場合
 # 人間: レビューする
 caucus review show myapp
 caucus feedback add myapp "件数も表示したい"
-caucus review done myapp     # フィードバックは次のバックログに入る
+caucus review done myapp     # フィードバックを AI がストーリーに変換してバックログへ
 
 caucus status                # 全プロジェクトの状態と要対応
 ```

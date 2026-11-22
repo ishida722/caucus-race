@@ -289,19 +289,47 @@ class ExecutionResult(BaseModel):
 
 ### 6.2 Planner（AI）
 
-プランニング系の判断（ストーリー選定、タスク分解、スパイク抽出、フィードバック変換）を担う。
+プランニング系の判断（ストーリー選定、タスク分解、スパイク抽出、フィードバック変換）を担う（`port/planner.py`）。
 
 ```python
 class Planner(Protocol):
-    def propose_stories(self, project: Project, context: PlanningContext) -> list[StoryDraft]: ...
-    def create_sprint_plan(self, project: Project, backlog: list[Story]) -> SprintPlanDraft: ...
-    def refine_story(self, story: Story) -> StoryDraft: ...
-    def convert_feedback(self, feedback: list[Feedback], sprint: Sprint) -> list[StoryDraft]: ...
+    def create_sprint_plan(self, context: PlanningContext) -> SprintPlanDraft: ...
+    def refine_story(self, context: PlanningContext, story: StoryView) -> StoryRefinementDraft: ...
+    def convert_feedback(self, context: PlanningContext, feedback: list[FeedbackView]) -> FeedbackConversionDraft: ...
 ```
 
-- **ClaudePlanner（案）**: Claude Code をヘッドレス（`claude -p`）で対象リポジトリをカレントにして起動し、コードを読んだうえで JSON を出力させる。出力は Pydantic で検証し、失敗時は再試行する。
-- プランナーは **下書き（Draft）を返すだけ** で、DB への反映はユースケースが行う。これにより AI の出力がドメインルールを破ることを防ぐ。
-- スパイクの判断基準（何を AI が決めてよく、何を人間に聞くか）はプロンプトで定義する。この基準は運用しながら調整する対象になるため、プロジェクトごとに上書きできる設定にする。
+- `PlanningContext` は、プロジェクトの説明、ストーリー数の上限、バックログ（未解決のスパイク・決定事項を含む）、前スプリントの結果（ストーリーの結果・フィードバック・レトロ記録）を持つ。再計画のときは、現在の計画と差し戻しコメントも持つ。
+- プランナーは **下書き（Draft）を返すだけ** で、DB への反映は `AIPlanningService`（`usecase/ai_planning.py`）が行う。下書きは次のように検証してから反映する。
+  - バックログにないストーリー ID は無視する。上限を超えたストーリーは先頭から上限までを採用する。採用できるストーリーが 0 件なら何も反映しない
+  - バックログのストーリーの未解決のスパイクは引き継ぐ（プランナーには書き直させない）
+- プランナーの呼び出しは時間がかかるため、DB のトランザクションの外で行う。
+
+**ClaudePlanner**（`adapter/planner/claude.py`）
+
+- 対象リポジトリをカレントにして `claude -p --output-format json --json-schema <Draft のスキーマ> --tools Read,Glob,Grep --permission-mode dontAsk --no-session-persistence` を実行する。プロンプトは標準入力で渡す。
+- 読み取り専用のツールだけを渡し、コードやドキュメントを読んだうえで判断させる。
+- 出力の `structured_output`（なければ `result` を JSON として）を Pydantic で検証する。失敗したら再試行する（既定 2 回）。
+- プロンプトは `adapter/planner/prompts.py` にある。スパイクの判断基準（spec §5.1.1）は `planner_config.spike_policy` で置き換え、`planner_config.instructions` でプロジェクト固有の指示を追加できる。
+
+`Project.planner_config` の項目:
+
+| キー | 既定 | 説明 |
+|---|---|---|
+| `type` | `manual` | `claude` で ClaudePlanner を使う。`manual` は AI を使わない（計画は人間が作り、フィードバックは機械的に変換する） |
+| `model` | なし | Claude のモデル |
+| `tools` | `["Read", "Glob", "Grep"]` | プランナーに渡すツール |
+| `timeout_seconds` | 1800 | 1 回の問い合わせの上限 |
+| `max_attempts` | 2 | 再試行を含む試行回数 |
+| `spike_policy` | なし | スパイクの判断基準を置き換える |
+| `instructions` | `""` | プロジェクト固有の追加指示 |
+
+**ユースケースへの組み込み**
+
+| 操作 | 処理 |
+|---|---|
+| `caucus plan sprint <project>` | 新しいスプリントの計画を作る。差し戻された計画（planning）があれば、コメントに従って作り直す。作り直すときは、現在の計画のストーリーをバックログに戻し、プランナーが起票した未解決のスパイクは取り下げる（回答済みのスパイクと決定事項は残す） |
+| `caucus spike answer` | ストーリーの未解決のスパイクがなくなったら、AI がタスクと受け入れ条件を見直す（`--no-refine` で抑止）。見直しは承認後（approved）でも行える。新たなスパイクが出た場合はスプリントを開始できなくなる |
+| `caucus review done` | 未変換のフィードバックを AI がストーリーに変換する（複数をまとめたり、1 件を分けたりできる）。AI が失敗した場合や取りこぼした分は、機械的に変換する |
 
 ### 6.3 Notifier
 
@@ -385,6 +413,6 @@ caucus-race/
 |---|---|---|
 | M1（完了） | domain・SQLite・CLI。人間がストーリーを手で起票し、計画・スパイク・承認・状態遷移が動く | FakeExecutor でスプリントが closed まで進む |
 | M2（実装済み・実際の vuoi での確認待ち） | オーケストレーターと VuoiExecutor | 実リポジトリでストーリーが vuoi により実装される |
-| M3 | ClaudePlanner（計画作成・スパイク抽出・フィードバック変換） | 人間の操作が承認・回答・レビューだけになる |
+| M3（実装済み・実際の claude での確認待ち） | ClaudePlanner（計画作成・スパイク抽出・フィードバック変換） | 人間の操作が承認・回答・レビューだけになる |
 | M4 | 通知・レビュー資料・複数プロジェクトの並行実行 | |
 | 以降 | レトロの活用、Web UI、ストーリーの並列実行 | |

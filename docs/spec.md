@@ -88,6 +88,26 @@ Project
 4. **計画の承認（人間）**
    スプリントゴールと、含まれるストーリー・タスクを確認して承認する。差し戻す場合はコメントを付け、AI が計画を作り直す。
 
+#### 5.1.1 スパイクの判断基準
+
+AI が決めてよいこと（スパイクにしない）:
+
+- 実装の詳細、内部構造、命名、テストの書き方
+- 既存のコードや慣習から妥当な答えが読み取れること
+- 後から低いコストでやり直せること
+
+人間に聞くこと（スパイクにする）:
+
+- 利用者から見える振る舞いや UI で、仕様やバックログから読み取れないもの
+- スコープの取捨選択（何を今回やらないか）
+- 外部との約束事: 公開 API、既存データに影響するスキーマ変更、認証・権限・セキュリティの方針
+- 費用が発生するもの、法務・個人情報に関わるもの
+- データの削除など、取り消しが難しい操作
+- 方向性が大きく異なる複数の案があり、どれを選ぶかで後の作業が大きく変わるもの
+- 要求同士が矛盾しているもの
+
+スパイクは 1 つにつき問いを 1 つとし、判断材料・選択肢・AI の推奨案を添える。この基準は運用しながら調整するため、プロジェクトごとに置き換えられるようにする。
+
 **開始条件:** 計画が承認済みであり、かつスプリントに含まれる全ストーリーに未解決のスパイクが残っていないこと。
 
 ### 5.2 スプリント実行
@@ -177,19 +197,19 @@ Project
 ## 8. 想定する利用の流れ（例）
 
 ```
-$ caucus project add chevuoi --repo ~/projects/chevuoi
-$ caucus plan chevuoi            # AI がストーリー選定・計画・スパイクを作成
-$ caucus spikes chevuoi          # 未解決のスパイクを一覧
-$ caucus spike answer SP-12 "認証は OAuth に統一する"
-$ caucus sprint approve chevuoi  # 計画を承認
-$ caucus sprint start chevuoi    # 実行開始（バックグラウンド）
+$ caucus project add chevuoi --repo ~/projects/chevuoi --executor vuoi --planner claude
+$ caucus plan sprint chevuoi     # AI がストーリー選定・計画・スパイクを作成
+$ caucus spike list chevuoi      # 未解決のスパイクを一覧
+$ caucus spike answer SP-12 "認証は OAuth に統一する"   # 回答後、AI がタスクを見直す
+$ caucus sprint approve chevuoi  # 計画を承認（差し戻す場合は sprint reject → plan sprint）
+$ caucus sprint start chevuoi    # 実行開始
 ...
-$ caucus review chevuoi          # レビュー資料を表示
+$ caucus review show chevuoi     # レビュー資料を表示
 $ caucus feedback add chevuoi "一覧画面の並び順が逆"
-$ caucus review done chevuoi     # スプリント終了、フィードバックをバックログへ
+$ caucus review done chevuoi     # スプリント終了、フィードバックを AI がストーリーに変換
 ```
 
-コマンド体系は仮のもの。UI の形態は §9 で検討する。
+UI の形態は §9 で検討する。
 
 ## 9. 未決事項
 

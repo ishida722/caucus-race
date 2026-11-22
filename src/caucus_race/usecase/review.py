@@ -14,6 +14,7 @@ from caucus_race.domain.status import (
 )
 from caucus_race.port.repository import Repository
 from caucus_race.settings import Settings
+from caucus_race.usecase.ai_planning import AIPlanningService
 from caucus_race.usecase.common import (
     latest_sprint,
     project_by_name,
@@ -63,8 +64,11 @@ def render_report(project: Project, sprint: Sprint, stories: list[Story], spikes
 
 class ReviewService:
     @inject
-    def __init__(self, repo: Repository, backlog: BacklogService, settings: Settings) -> None:
+    def __init__(
+        self, repo: Repository, backlog: BacklogService, ai: AIPlanningService, settings: Settings
+    ) -> None:
         self.repo = repo
+        self.ai = ai
         self.backlog = backlog
         self.report_dir = settings.data_dir / "reviews"
 
@@ -127,6 +131,9 @@ class ReviewService:
 
     def close(self, project_name: str) -> Sprint:
         """レビューを完了する。未変換のフィードバックはストーリーに変換し、未完了のストーリーはバックログに戻す（R-6）。"""
+        self._review_sprint(project_by_name(self.repo, project_name))
+        # AI で変換する（失敗時は機械的に変換される）。残ったものは下で 1 件ずつ変換する
+        self.ai.convert_pending_feedback(project_name)
         with self.repo.transaction():
             project = project_by_name(self.repo, project_name)
             sprint = self._review_sprint(project)

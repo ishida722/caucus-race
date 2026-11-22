@@ -41,6 +41,7 @@ class Project(Entity):
     base_branch: str = "main"
     max_stories_per_sprint: int = 5
     executor_config: dict[str, Any] = Field(default_factory=lambda: {"type": "fake"})
+    planner_config: dict[str, Any] = Field(default_factory=lambda: {"type": "manual"})
 
 
 class Sprint(Entity):

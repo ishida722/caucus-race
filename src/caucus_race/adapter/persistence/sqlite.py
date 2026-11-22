@@ -142,6 +142,11 @@ class SqliteRepository:
                 raise NotFoundError(f"{entity.id} が見つかりません")
         return entity
 
+    def delete[E: Entity](self, entity_type: type[E], entity_id: str) -> None:
+        table = TABLES[entity_type]
+        with self._connection() as conn:
+            conn.execute(table.delete().where(table.c.id == entity_id))
+
     def find[E: Entity](self, entity_type: type[E], entity_id: str) -> E | None:
         table = TABLES[entity_type]
         with self._connection() as conn:
