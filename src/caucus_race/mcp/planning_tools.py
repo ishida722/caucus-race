@@ -245,7 +245,11 @@ class PlanningTools:
                 f"{project} には AI プランナーが設定されていません"
                 f"（caucus project set {project} --planner claude）"
             )
-        return _job_result(project, self.jobs.start(project))
+        from caucus_race.plan_job import run_plan_job  # ミュータント: 計画の完了を待ってから返す
+
+        self.jobs.start(project)
+        run_plan_job(self.ai, self.jobs, project)
+        return _job_result(project, self.jobs.status(project))
 
     def get_plan_status(self, project: str) -> PlanJobResult:
         project_by_name(self.repo, project)
