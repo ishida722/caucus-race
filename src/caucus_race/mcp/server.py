@@ -1,8 +1,12 @@
-"""caucus-race のバックログ起票とスプリント計画を、エージェントに公開する MCP サーバー。
+"""caucus-race を、エージェントに公開する MCP サーバー。
+
+- バックログの起票とスプリント計画（planning_tools.py）
+- 人間の判断にあたる操作（スパイク回答・計画の承認・スプリントの実行・レビュー）を、人間の指示で
+  エージェントが伝えるためのツール（human_tools.py）
 
 stdout は MCP のプロトコル通信に使うため、ここでは print しない。ログは stderr に出る。
 
-ツールの中身は SDK に依存しない planning_tools.py にある。
+ツールの中身は SDK に依存しない planning_tools.py・human_tools.py にある。
 """
 
 import functools
@@ -14,6 +18,17 @@ from mcp.server.mcpserver import MCPServer
 from mcp.types import CallToolResult, TextContent
 
 from caucus_race.container import build_injector
+from caucus_race.mcp.human_tools import (
+    FeedbackResult,
+    HumanTools,
+    OpenSpikeResult,
+    PlanDecisionResult,
+    ReviewCompleteResult,
+    ReviewResult,
+    SpikeAnswerResult,
+    SprintRunResult,
+    SprintStopResult,
+)
 from caucus_race.mcp.planning_tools import (
     PlanJobResult,
     PlanningTools,
@@ -31,8 +46,12 @@ INSTRUCTIONS = """\
 caucus-race（AI エージェントによるスプリント開発のオーケストレーター）のバックログとスプリント計画を操作する。
 ストーリーの起票、スプリントの作成、ストーリーの追加・除外、タスクとスパイクの追加、
 AI プランナーによる計画の作成ができる。
-計画の承認・スパイクへの回答・スプリントの実行は人間が caucus コマンドで行う。
-plan_sprint は時間がかかるため、開始だけしてすぐに返る。結果は get_plan_status で確認する。"""
+plan_sprint は時間がかかるため、開始だけしてすぐに返る。結果は get_plan_status で確認する。
+
+スパイクへの回答・計画の承認と差し戻し・スプリントの開始と停止と再開・フィードバックの登録・レビューの完了は
+人間の判断にあたる。人間の明示的な指示があるときだけ呼ぶ。エージェントが自分の判断で呼ばない。
+判断の材料には list_spikes・get_review を使う。
+スプリントの開始と再開はバックグラウンドで実行し、すぐに pid とログの保存先を返す。"""
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +82,9 @@ def create_server(injector: Injector | None = None) -> MCPServer:
 
     def tools() -> PlanningTools:
         return container.get(PlanningTools)
+
+    def human() -> HumanTools:
+        return container.get(HumanTools)
 
     server = MCPServer(SERVER_NAME, instructions=INSTRUCTIONS)
 
@@ -168,5 +190,142 @@ def create_server(injector: Injector | None = None) -> MCPServer:
             project: プロジェクト名
         """
         return tools().get_plan_status(project)
+
+    # --- 人間の判断にあたる操作 ---
+
+    @tool
+    def list_spikes(project: str) -> list[OpenSpikeResult]:
+        """プロジェクトの未解決のスパイク（人間に回答してもらう質問）を一覧する（caucus spike list 相当）。
+
+        人間に回答を求めるときの材料にする。
+
+        Args:
+            project: プロジェクト名
+        """
+        return human().list_spikes(project)
+
+    @tool
+    def answer_spike(spike_id: str, answer: str) -> SpikeAnswerResult:
+        """スパイクに人間の回答を登録する（caucus spike answer 相当）。
+
+        回答はストーリーの決定事項に追加される。
+
+        人間の明示的な指示があるときだけ呼ぶ。エージェントが自分の判断で呼ばない。
+        回答は人間が述べた内容をそのまま渡す。
+
+        AI プランナーが設定されていて、ストーリーの未解決のスパイクがなくなった場合は、
+        AI によるストーリーの見直し（caucus plan refine 相当）をバックグラウンドで始め、
+        完了を待たずに返る（refine_started: true）。
+
+        Args:
+            spike_id: スパイクの ID（例: SP-1）
+            answer: 人間の回答
+        """
+        return human().answer_spike(spike_id, answer)
+
+    @tool
+    def approve_plan(project: str) -> PlanDecisionResult:
+        """計画中のスプリントを承認する（caucus sprint approve 相当）。
+
+        人間の明示的な指示があるときだけ呼ぶ。エージェントが自分の判断で呼ばない。
+
+        Args:
+            project: プロジェクト名
+        """
+        return human().approve_plan(project)
+
+    @tool
+    def reject_plan(project: str, comment: str) -> PlanDecisionResult:
+        """スプリント計画を差し戻す（caucus sprint reject 相当）。コメントは必須。
+
+        人間の明示的な指示があるときだけ呼ぶ。エージェントが自分の判断で呼ばない。
+
+        Args:
+            project: プロジェクト名
+            comment: 差し戻しの理由（人間が述べた内容）。plan_sprint で作り直すときに AI に渡る
+        """
+        return human().reject_plan(project, comment)
+
+    @tool
+    def start_sprint(project: str) -> SprintRunResult:
+        """承認済みのスプリントを開始する（caucus sprint start --detach 相当）。
+
+        人間の明示的な指示があるときだけ呼ぶ。エージェントが自分の判断で呼ばない。
+
+        スプリント用のブランチを作り、ストーリーの実行をバックグラウンドで始めて、完了を待たずに
+        スプリント番号・ブランチ・pid・ログの保存先を返す。既に実行中ならエラーになる。
+
+        Args:
+            project: プロジェクト名
+        """
+        return human().start_sprint(project)
+
+    @tool
+    def stop_sprint(project: str) -> SprintStopResult:
+        """バックグラウンドで実行中のスプリントを止める（caucus sprint stop 相当）。
+
+        人間の明示的な指示があるときだけ呼ぶ。エージェントが自分の判断で呼ばない。
+
+        実行中だったストーリーは resume_sprint で再開したときに再実行される。実行中でなければエラーになる。
+
+        Args:
+            project: プロジェクト名
+        """
+        return human().stop_sprint(project)
+
+    @tool
+    def resume_sprint(project: str) -> SprintRunResult:
+        """停止したスプリントの実行を再開する（caucus sprint resume --detach 相当）。
+
+        人間の明示的な指示があるときだけ呼ぶ。エージェントが自分の判断で呼ばない。
+
+        バックグラウンドで実行し、完了を待たずに pid とログの保存先を返す。既に実行中ならエラーになる。
+
+        Args:
+            project: プロジェクト名
+        """
+        return human().resume_sprint(project)
+
+    @tool
+    def get_review(project: str) -> ReviewResult:
+        """レビュー待ちのスプリントのレビュー資料を生成し、Markdown 本文と保存先を返す。
+
+        caucus review show 相当。
+
+        AI プランナーが設定されていると、初回は AI に確認手順を書かせるため数分かかることがある
+        （2 回目以降は保存した確認手順を使う）。
+
+        Args:
+            project: プロジェクト名
+        """
+        return human().get_review(project)
+
+    @tool
+    def add_feedback(project: str, body: str, story_id: str | None = None) -> FeedbackResult:
+        """レビュー中のスプリントに人間のフィードバックを登録する（caucus feedback add 相当）。
+
+        人間の明示的な指示があるときだけ呼ぶ。エージェントが自分の判断で呼ばない。
+        内容は人間が述べたものを渡す。
+
+        Args:
+            project: プロジェクト名
+            body: フィードバックの本文
+            story_id: 対象のストーリーの ID（任意）
+        """
+        return human().add_feedback(project, body, story_id)
+
+    @tool
+    def complete_review(project: str) -> ReviewCompleteResult:
+        """レビューを完了し、スプリントを終了する（caucus review done 相当）。
+
+        人間の明示的な指示があるときだけ呼ぶ。エージェントが自分の判断で呼ばない。
+
+        未変換のフィードバックはストーリーに変換し（AI プランナーが設定されていれば AI が変換するため
+        時間がかかることがある）、未完了のストーリーはバックログに戻す。
+
+        Args:
+            project: プロジェクト名
+        """
+        return human().complete_review(project)
 
     return server

@@ -22,6 +22,7 @@ from caucus_race.port.notifier import Notifier
 from caucus_race.port.planner import Planner, PlannerFactory
 from caucus_race.port.repository import Repository
 from caucus_race.port.workspace import Workspace
+from caucus_race.runner import BackgroundRunner
 from caucus_race.settings import Settings
 
 
@@ -83,6 +84,10 @@ class AppModule(Module):
         binder.bind(ExecutorFactory, to=ConfiguredExecutorFactory, scope=singleton)  # type: ignore[type-abstract]
         binder.bind(PlannerFactory, to=ConfiguredPlannerFactory, scope=singleton)  # type: ignore[type-abstract]
         binder.bind(PlanJobs, to=InstanceProvider(PlanJobs(self.settings.run_dir, self.settings.log_dir)))
+        binder.bind(
+            BackgroundRunner,
+            to=InstanceProvider(BackgroundRunner(self.settings.run_dir, self.settings.log_dir)),
+        )
 
 
 def build_injector(settings: Settings | None = None) -> Injector:

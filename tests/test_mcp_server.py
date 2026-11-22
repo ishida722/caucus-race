@@ -31,6 +31,17 @@ TOOLS = {
     "add_spike": {"story_id", "question", "context", "options", "recommendation"},
     "plan_sprint": {"project"},
     "get_plan_status": {"project"},
+    # ST-3: 人間の判断にあたる操作と、その材料の参照
+    "list_spikes": {"project"},
+    "answer_spike": {"spike_id", "answer"},
+    "approve_plan": {"project"},
+    "reject_plan": {"project", "comment"},
+    "start_sprint": {"project"},
+    "stop_sprint": {"project"},
+    "resume_sprint": {"project"},
+    "get_review": {"project"},
+    "add_feedback": {"project", "body", "story_id"},
+    "complete_review": {"project"},
 }
 
 
@@ -50,8 +61,8 @@ def text(result: CallToolResult) -> str:
     return "".join(getattr(c, "text", "") for c in result.content)
 
 
-def test_server_lists_the_eight_tools_with_their_arguments(env: Env) -> None:
-    """MCP のクライアントから、README に書いた 8 つのツールが、それぞれの引数とともに見えること。"""
+def test_server_lists_all_tools_with_their_arguments(env: Env) -> None:
+    """MCP のクライアントから、README に書いたすべてのツールが、それぞれの引数とともに見えること。"""
     listed = with_client(env, lambda c: c.list_tools())
     found = {t.name: set(t.input_schema["properties"]) for t in listed.tools}
     assert found == TOOLS
