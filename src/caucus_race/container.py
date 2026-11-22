@@ -1,6 +1,7 @@
 from injector import Binder, Injector, InstanceProvider, Module, singleton
 
 from caucus_race.adapter.executor.fake import FakeExecutor
+from caucus_race.adapter.executor.vuoi import VuoiConfig, VuoiExecutor
 from caucus_race.adapter.notifier.console import ConsoleNotifier
 from caucus_race.adapter.persistence.sqlite import SqliteRepository
 from caucus_race.adapter.workspace.git import GitWorkspace
@@ -21,6 +22,9 @@ class ConfiguredExecutorFactory:
         match kind:
             case "fake":
                 return FakeExecutor()
+            case "vuoi":
+                options = {k: v for k, v in project.executor_config.items() if k != "type"}
+                return VuoiExecutor(VuoiConfig.model_validate(options))
             case _:
                 raise DomainError(f"実行器 {kind} には対応していません")
 

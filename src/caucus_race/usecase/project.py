@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Any
 
 from injector import inject
 
@@ -22,7 +23,7 @@ class ProjectService:
         description: str = "",
         base_branch: str = "main",
         max_stories_per_sprint: int = 5,
-        executor: str = "fake",
+        executor_config: dict[str, Any] | None = None,
     ) -> Project:
         if not (repo_path / ".git").exists():
             raise DomainError(f"{repo_path} は git リポジトリではありません")
@@ -37,10 +38,34 @@ class ProjectService:
                     description=description,
                     base_branch=base_branch,
                     max_stories_per_sprint=max_stories_per_sprint,
-                    executor_config={"type": executor},
+                    executor_config=executor_config or {"type": "fake"},
                 )
             )
             record(self.repo, Actor.HUMAN, project, "project.registered")
+        return project
+
+    def configure(
+        self,
+        name: str,
+        *,
+        description: str | None = None,
+        base_branch: str | None = None,
+        max_stories_per_sprint: int | None = None,
+        executor_config: dict[str, Any] | None = None,
+    ) -> Project:
+        """指定した項目だけを更新する。executor_config は既存の設定に上書きでマージする。"""
+        with self.repo.transaction():
+            project = project_by_name(self.repo, name)
+            if description is not None:
+                project.description = description
+            if base_branch is not None:
+                project.base_branch = base_branch
+            if max_stories_per_sprint is not None:
+                project.max_stories_per_sprint = max_stories_per_sprint
+            if executor_config:
+                project.executor_config = {**project.executor_config, **executor_config}
+            self.repo.save(project)
+            record(self.repo, Actor.HUMAN, project, "project.configured")
         return project
 
     def list_projects(self) -> list[Project]:

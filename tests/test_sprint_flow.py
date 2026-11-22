@@ -5,7 +5,7 @@ from injector import Injector
 
 from caucus_race.adapter.executor.fake import FakeExecutor
 from caucus_race.adapter.notifier.console import RecordingNotifier
-from caucus_race.domain.entities import ExecutionResult, Spike, Sprint, Story, Task
+from caucus_race.domain.entities import ExecutionResult, Proposal, Spike, Sprint, Story, Task
 from caucus_race.domain.errors import DomainError, InvalidTransitionError
 from caucus_race.domain.status import (
     SpikeOrigin,
@@ -177,7 +177,9 @@ def test_executor_exception_marks_story_failed(make_injector, git_repo: Path) ->
 
 def test_proposals_are_added_to_backlog(make_injector, git_repo: Path) -> None:
     def with_proposal(brief: Brief, workdir: Path) -> ExecutionResult:
-        return ExecutionResult(status="done", proposals=["ログ出力を整理する\n詳細"])
+        return ExecutionResult(
+            status="done", proposals=[Proposal(title="ログ出力を整理する", body="詳細", kind="debt")]
+        )
 
     app = App(make_injector(FakeExecutor(default=with_proposal)))
     app.projects.register(P, git_repo)

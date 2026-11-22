@@ -57,7 +57,7 @@ def render_report(project: Project, sprint: Sprint, stories: list[Story], spikes
     proposals = [p for s in stories if s.result for p in s.result.proposals]
     if proposals:
         lines += ["", "## 実行器が挙げた範囲外の課題（バックログに追加済み）"]
-        lines += [f"- {p.splitlines()[0]}" for p in proposals]
+        lines += [f"- [{p.kind}] {p.title}" for p in proposals]
     return "\n".join(lines) + "\n"
 
 

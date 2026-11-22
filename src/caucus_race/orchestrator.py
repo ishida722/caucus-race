@@ -10,6 +10,7 @@ from injector import inject
 from caucus_race.domain.entities import (
     ExecutionResult,
     Project,
+    Proposal,
     Spike,
     Sprint,
     Story,
@@ -137,6 +138,7 @@ class Orchestrator:
             self.repo.save(story)
             record(self.repo, Actor.SYSTEM, story, "story.started", start_sha=story.start_sha)
 
+        logger.info("%s: %s を実行します", story.id, story.title)
         tasks = sorted(self.repo.query(Task, story_id=story.id), key=lambda t: t.order)
         executor = self.executors.for_project(project)
         try:
@@ -181,6 +183,7 @@ class Orchestrator:
             self._preserve_and_reset(project, story)
             story.status = StoryStatus.SUSPENDED if result.status == "blocked" else StoryStatus.FAILED
 
+        logger.info("%s: %s（%s）", story.id, story.status, result.summary or result.error or "")
         with self.repo.transaction():
             story.result = result
             self.repo.save(story)
@@ -220,21 +223,20 @@ class Orchestrator:
                 )
             )
 
-    def _add_proposal(self, project: Project, story: Story, proposal: str) -> None:
+    def _add_proposal(self, project: Project, story: Story, proposal: Proposal) -> None:
         priority = len(self.repo.query(Story, project_id=project.id))
-        title, _, rest = proposal.partition("\n")
         new = self.repo.add(
             Story(
                 id=self.repo.next_id(Story),
                 project_id=project.id,
-                title=title.strip()[:200] or "（無題の提案）",
-                description=proposal,
+                title=proposal.title.strip()[:200] or "（無題の提案）",
+                description=f"{proposal.body}\n\n（{story.id} の実行中に挙がった {proposal.kind}）".strip(),
                 source=StorySource.EXECUTOR_PROPOSAL,
                 source_ref=story.id,
                 priority=priority,
             )
         )
-        record(self.repo, Actor.EXECUTOR, new, "story.added", source=new.source)
+        record(self.repo, Actor.EXECUTOR, new, "story.added", source=new.source, proposal_kind=proposal.kind)
 
     def _finish(self, project: Project, sprint: Sprint) -> None:
         """全ストーリーが終了したのでレビューに進める（R-5）。"""

@@ -1,6 +1,7 @@
+import logging
 from functools import cache
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from injector import Injector
@@ -60,6 +61,9 @@ def repo() -> Repository:
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", datefmt="%H:%M:%S"
+    )
     try:
         app()
     except (DomainError, WorkspaceError) as e:
@@ -74,6 +78,26 @@ def _story_line(story: Story) -> str:
 # --- project ---
 
 
+ExecutorOpt = Annotated[str | None, typer.Option("--executor", help="実行器の種類（fake / vuoi）")]
+WorkflowOpt = Annotated[str | None, typer.Option("--workflow", help="vuoi のワークフロー名（既定 dev）")]
+TestCommandOpt = Annotated[
+    list[str] | None, typer.Option("--test-command", help="vuoi に渡すテストコマンド（複数可）")
+]
+
+
+def _executor_config(
+    executor: str | None, workflow: str | None, test_commands: list[str] | None
+) -> dict[str, Any]:
+    config: dict[str, Any] = {}
+    if executor is not None:
+        config["type"] = executor
+    if workflow is not None:
+        config["workflow"] = workflow
+    if test_commands:
+        config["test_commands"] = test_commands
+    return config
+
+
 @project_app.command("add")
 def project_add(
     name: str,
@@ -81,7 +105,9 @@ def project_add(
     description: Annotated[str, typer.Option("--description", "-d")] = "",
     base_branch: Annotated[str, typer.Option("--base")] = "main",
     max_stories: Annotated[int, typer.Option("--max-stories")] = 5,
-    executor: Annotated[str, typer.Option("--executor", help="実行器の種類（現在は fake のみ）")] = "fake",
+    executor: ExecutorOpt = "fake",
+    workflow: WorkflowOpt = None,
+    test_commands: TestCommandOpt = None,
 ) -> None:
     """プロジェクトを登録する。"""
     project = get(ProjectService).register(
@@ -90,9 +116,32 @@ def project_add(
         description=description,
         base_branch=base_branch,
         max_stories_per_sprint=max_stories,
-        executor=executor,
+        executor_config=_executor_config(executor, workflow, test_commands),
     )
     typer.echo(f"{project.id} {project.name} を登録しました")
+
+
+@project_app.command("set")
+def project_set(
+    name: str,
+    description: Annotated[str | None, typer.Option("--description", "-d")] = None,
+    base_branch: Annotated[str | None, typer.Option("--base")] = None,
+    max_stories: Annotated[int | None, typer.Option("--max-stories")] = None,
+    executor: ExecutorOpt = None,
+    workflow: WorkflowOpt = None,
+    test_commands: TestCommandOpt = None,
+) -> None:
+    """プロジェクトの設定を変更する。指定した項目だけを更新する。"""
+    project = get(ProjectService).configure(
+        name,
+        description=description,
+        base_branch=base_branch,
+        max_stories_per_sprint=max_stories,
+        executor_config=_executor_config(executor, workflow, test_commands),
+    )
+    typer.echo(
+        f"{project.name} を更新しました: base={project.base_branch} executor={project.executor_config}"
+    )
 
 
 @project_app.command("list")

@@ -58,13 +58,21 @@ class Sprint(Entity):
     closed_at: datetime | None = None
 
 
+class Proposal(BaseModel):
+    """実行器が作業中に見つけた範囲外の課題。バックログのストーリーになる。"""
+
+    title: str
+    body: str = ""
+    kind: str = "chore"
+
+
 class ExecutionResult(BaseModel):
     status: Literal["done", "blocked", "error"]
     summary: str = ""
     blocked_reason: str | None = None
     error: str | None = None
     changed_files: list[str] = Field(default_factory=list)
-    proposals: list[str] = Field(default_factory=list)
+    proposals: list[Proposal] = Field(default_factory=list)
     raw: dict[str, Any] = Field(default_factory=dict)
 
 

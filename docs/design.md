@@ -261,16 +261,27 @@ class ExecutionResult(BaseModel):
     summary: str
     blocked_reason: str | None
     changed_files: list[str]
-    proposals: list[str]         # 範囲外の課題 → バックログ候補
+    proposals: list[Proposal]    # 範囲外の課題（title / body / kind）→ バックログ候補
     raw: dict                    # 実行器の出力をそのまま保存
 ```
 
-**VuoiExecutor（案）**: 現在の `vuoi exec` のインターフェースに合わせる。
+**VuoiExecutor**（`adapter/executor/vuoi.py`）: `vuoi exec` のインターフェースに合わせる。
 
-1. `Brief` を vuoi のブリーフ形式（目的 / 決定事項 / 作業内容 / 受け入れ条件 / 触らない範囲）の Markdown に変換し、対象リポジトリの git ディレクトリ配下に置く。
-2. `vuoi exec <workflow> --brief <file> --json <result>` を実行する。ワークフロー名は `Project.executor_config` から取得する（既定は `dev`）。
-3. 結果 JSON の `status` / `summary` / `blocked` / `changed_files` / `proposals` を `ExecutionResult` に写す。
-4. `blocked` はスパイク、`proposals` は `source = executor_proposal` のストーリーとしてバックログへ取り込む。
+1. `Brief` を vuoi のブリーフ形式（目的 / 決定事項 / 作業内容 / 受け入れ条件 / 触らない範囲）の Markdown に変換し、`<git-dir>/caucus/brief-<story>-<時刻>.md` に置く。作業ツリーに置くと変更ファイルとして混ざるためである。
+2. 対象リポジトリをカレントにして `vuoi exec <workflow> --brief <file> --json <result> [--test-command ...]` を実行する。標準出力・標準エラーは `<git-dir>/caucus/log-*.txt` に保存する。
+3. 結果 JSON（vuoi の `ExecOutcome`）を `ExecutionResult` に写す。`blocked` → `blocked_reason`、`proposals[].{title, body, kind}` → `Proposal`。判定には終了コードではなく JSON の `status` を使う。
+4. JSON が読めない、コマンドがない、タイムアウトした場合は `error` とする。
+5. `blocked` はスパイク、`proposals` は `source = executor_proposal` のストーリーとしてバックログへ取り込む（オーケストレーターが行う）。
+
+`Project.executor_config` の項目:
+
+| キー | 既定 | 説明 |
+|---|---|---|
+| `type` | `fake` | `vuoi` で VuoiExecutor を使う |
+| `workflow` | `dev` | vuoi のワークフロー名 |
+| `test_commands` | `[]` | `--test-command` として渡す。空なら vuoi 側の設定に従う |
+| `command` | `vuoi` | vuoi の実行ファイル |
+| `timeout_seconds` | 10800 | 1 ストーリーの実行時間の上限 |
 
 ブランチ操作は caucus-race が行う（§6.4）。vuoi のワークフローがコミットすることは許容し、未コミットの変更が残った場合だけ caucus-race がコミットする。
 
@@ -372,8 +383,8 @@ caucus-race/
 
 | 段階 | 内容 | 完了の目安 |
 |---|---|---|
-| M1 | domain・SQLite・CLI。人間がストーリーを手で起票し、計画・スパイク・承認・状態遷移が動く | FakeExecutor でスプリントが closed まで進む |
-| M2 | オーケストレーターと VuoiExecutor | 実リポジトリでストーリーが vuoi により実装される |
+| M1（完了） | domain・SQLite・CLI。人間がストーリーを手で起票し、計画・スパイク・承認・状態遷移が動く | FakeExecutor でスプリントが closed まで進む |
+| M2（実装済み・実際の vuoi での確認待ち） | オーケストレーターと VuoiExecutor | 実リポジトリでストーリーが vuoi により実装される |
 | M3 | ClaudePlanner（計画作成・スパイク抽出・フィードバック変換） | 人間の操作が承認・回答・レビューだけになる |
 | M4 | 通知・レビュー資料・複数プロジェクトの並行実行 | |
 | 以降 | レトロの活用、Web UI、ストーリーの並列実行 | |
