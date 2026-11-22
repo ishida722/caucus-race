@@ -175,6 +175,8 @@ class BackgroundRunner:
         return pid
 
     def ensure_not_running(self, project_name: str) -> None:
+        if (info := self.running(project_name)) is not None:
+            raise DomainError(f"このプロジェクトのスプリントは既に実行中です（pid {info.pid}）")
         if (pid := self._launching(project_name)) is not None:
             raise DomainError(f"このプロジェクトのスプリントは既に実行中です（pid {pid}）")
 
