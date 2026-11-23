@@ -9,6 +9,7 @@ authors = [
 requires-python = ">=3.14"
 dependencies = [
     "injector>=0.22",
+    "mcp>=2.3.0",
     "pydantic>=2.11",
     "sqlalchemy>=2.0",
     "typer>=0.16",
@@ -38,3 +39,5 @@ select = ["E", "F", "I", "UP", "B"]
 
 [tool.ruff.lint.per-file-ignores]
 "src/caucus_race/adapter/planner/prompts.py" = ["E501"]
+# test_mcp_planning のフィクスチャ（env・planner）を import して共有する
+"tests/test_mcp_server.py" = ["F401", "F811"]

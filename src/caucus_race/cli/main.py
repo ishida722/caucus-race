@@ -1,6 +1,5 @@
 import logging
 import signal
-from datetime import datetime
 from functools import cache
 from pathlib import Path
 from typing import Annotated, Any
@@ -14,12 +13,12 @@ from caucus_race.domain.entities import Feedback, Project, Spike, Story, Task
 from caucus_race.domain.errors import DomainError
 from caucus_race.domain.status import Author, SpikeStatus, SprintStatus
 from caucus_race.orchestrator import Orchestrator
+from caucus_race.plan_job import PlanJobs, run_plan_job
 from caucus_race.port.notifier import HumanActionRequired, Notifier
 from caucus_race.port.planner import PlannerError
 from caucus_race.port.repository import Repository
 from caucus_race.port.workspace import WorkspaceError
-from caucus_race.runner import RunLock, runner_argv, spawn_detached
-from caucus_race.runner import stop as stop_run
+from caucus_race.runner import BackgroundRunner, RunLock
 from caucus_race.settings import Settings
 from caucus_race.usecase.ai_planning import AIPlanningService
 from caucus_race.usecase.common import (
@@ -28,6 +27,7 @@ from caucus_race.usecase.common import (
     project_by_name,
     require_open_sprint,
     sprint_stories,
+    story_to_refine,
 )
 from caucus_race.usecase.planning import PlanningService
 from caucus_race.usecase.project import BacklogService, ProjectService
@@ -307,8 +307,12 @@ DetachOpt = Annotated[
 ]
 
 
+def _runner() -> BackgroundRunner:
+    return get(BackgroundRunner)
+
+
 def _lock(project: str) -> RunLock:
-    return RunLock(get(Settings).run_dir, project)
+    return _runner().lock(project)
 
 
 def _run_foreground(project: str, log_path: Path | None = None) -> None:
@@ -344,21 +348,15 @@ def _run(project: str, detach: bool) -> None:
     if not detach:
         _run_foreground(project)
         return
-    lock = _lock(project)
-    if (info := lock.running()) is not None:
-        raise DomainError(f"このプロジェクトのスプリントは既に実行中です（pid {info.pid}）")
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    log_path = get(Settings).log_dir / f"{project}-{stamp}.log"
-    pid = spawn_detached(runner_argv(project, log_path), log_path)
-    typer.echo(f"バックグラウンドで実行しています（pid {pid}）")
-    typer.echo(f"ログ: {log_path}")
+    launched = _runner().start_run(project)
+    typer.echo(f"バックグラウンドで実行しています（pid {launched.pid}）")
+    typer.echo(f"ログ: {launched.log_path}")
 
 
 @sprint_app.command("start")
 def sprint_start(project: str, detach: DetachOpt = False) -> None:
     """スプリントを開始し、ストーリーを順に実行する。"""
-    if (info := _lock(project).running()) is not None:
-        raise DomainError(f"このプロジェクトのスプリントは既に実行中です（pid {info.pid}）")
+    _runner().ensure_not_running(project)
     sprint = get(SprintService).start(project)
     typer.echo(f"スプリント #{sprint.number} を開始しました（{sprint.branch}）")
     _run(project, detach)
@@ -381,10 +379,7 @@ def sprint_run(
 @sprint_app.command("stop")
 def sprint_stop(project: str) -> None:
     """バックグラウンドで実行中のスプリントを止める。実行中だったストーリーは resume で再実行される。"""
-    info = _lock(project).running()
-    if info is None:
-        raise DomainError(f"{project} のスプリントは実行されていません")
-    stop_run(info)
+    info = _runner().stop_run(project)
     typer.echo(f"停止を指示しました（pid {info.pid}）。再開するには caucus sprint resume {project}")
 
 
@@ -464,11 +459,8 @@ def spike_answer(
     """
     spike = get(PlanningService).answer_spike(spike_id, answer)
     typer.echo(f"{spike_id} に回答しました")
-    r = repo()
-    story = r.get(Story, spike.story_id)
-    project = r.get(Project, story.project_id)
-    remaining = r.query(Spike, story_id=story.id, status=SpikeStatus.OPEN)
-    if refine and not remaining and project.planner_config.get("type", "manual") != "manual":
+    story = story_to_refine(repo(), spike)
+    if refine and story is not None:
         typer.echo(f"AI が {story.id} を見直しています...")
         get(AIPlanningService).refine(story.id)
         typer.echo(f"{story.id} を見直しました（caucus story show {story.id}）")
@@ -484,6 +476,13 @@ def plan_sprint(project: str) -> None:
     sprint = get(AIPlanningService).plan(project)
     typer.echo(f"スプリント #{sprint.number} の計画を作成しました")
     sprint_show(project)
+
+
+@plan_app.command("run", hidden=True)
+def plan_run(project: str) -> None:
+    """（内部用）スプリント計画を作成し、結果をジョブの状態に書く。MCP の plan_sprint が起動する。"""
+    if not run_plan_job(get(AIPlanningService), get(PlanJobs), project):
+        raise SystemExit(1)
 
 
 @plan_app.command("refine")
@@ -614,6 +613,18 @@ def notifications(limit: Annotated[int, typer.Option("--limit", "-n")] = 20) -> 
     history = HistoryNotifier(get(Settings).data_dir / "notifications.jsonl")
     for record in history.read(limit):
         typer.echo(f"{record['at'][:19]} [{record['kind']}] {record['project']}: {record['message']}")
+
+
+@app.command("mcp")
+def mcp() -> None:
+    """MCP サーバーを stdio で起動する。
+
+    Claude Code などのエージェントから、バックログの起票・スプリント計画と、人間の指示による
+    承認・実行・レビューを行うために使う。
+    """
+    from caucus_race.mcp.server import create_server
+
+    create_server(container()).run("stdio")
 
 
 if __name__ == "__main__":

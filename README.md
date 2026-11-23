@@ -77,6 +77,61 @@ command = ["my-notify-script"]                   # 通知の内容を JSON で�
 slack_webhook_env = "CAUCUS_SLACK_WEBHOOK_URL"   # Webhook の URL を入れた環境変数の名前
 ```
 
+## MCP サーバー
+
+`caucus mcp` で MCP サーバーを stdio で起動する。Claude Code などのエージェントとの対話の中で、バックログの起票とスプリント計画ができる。人間の指示をエージェントが伝える形で、スパイクへの回答・計画の承認・スプリントの実行・レビューもできる。
+
+Claude Code に登録する（`caucus` コマンドに PATH が通っている前提）:
+
+```bash
+claude mcp add caucus-race -- caucus mcp
+# CAUCUS_HOME を指定する場合
+claude mcp add caucus-race -e CAUCUS_HOME=/path/to/home -- caucus mcp
+```
+
+登録後、`claude mcp list` で `caucus-race` が接続済みになっていることを確認する。
+
+### バックログの起票とスプリント計画
+
+| ツール | 引数 | 内容 |
+| --- | --- | --- |
+| `add_story` | `project`, `title`, `description`, `acceptance_criteria` | バックログにストーリーを追加する（`caucus story add` 相当） |
+| `create_sprint` | `project`, `goal` | スプリントを作成する（`caucus sprint new` 相当） |
+| `add_story_to_sprint` | `project`, `story_id` | 計画中のスプリントにストーリーを追加する |
+| `remove_story_from_sprint` | `project`, `story_id` | スプリントからストーリーを外してバックログに戻す |
+| `add_task` | `story_id`, `title`, `description` | ストーリーにタスクを追加する |
+| `add_spike` | `story_id`, `question`, `context`, `options`, `recommendation` | ストーリーにスパイクを起票する |
+| `plan_sprint` | `project` | AI プランナーに計画を作らせる（`caucus plan sprint` 相当）。別プロセスで開始してすぐに返る |
+| `get_plan_status` | `project` | `plan_sprint` の状態（`not_started` / `running` / `succeeded` / `failed`） |
+
+- AI による計画の作成は数分かかるため、`plan_sprint` は `caucus plan run`（内部用）を別プロセスで起動して、完了を待たずに返る。エージェントは `get_plan_status` で結果を確認する。ログは `CAUCUS_HOME/logs/<project>-plan-*.log` に出る（`<project>` はファイル名に使えるようエンコードしたもの。英大文字・記号・非 ASCII は `%XX` になり、長い名前は先頭とハッシュになる）。失敗したときは、`get_plan_status` の `log_path` でログの場所が分かる
+- 計画の作成中は、そのプロジェクトのスプリント計画を変更するツール（スプリントの作成、ストーリーの追加・除外、タスク・スパイクの追加）はエラーになる
+- ルール違反（承認後の計画変更、終了していないスプリントがある状態でのスプリント作成など）は、CLI の「エラー: ...」と同じメッセージがエラーの結果（isError）として返る
+
+### 人間の判断にあたる操作
+
+判断するのは人間で、エージェントは人間の指示を伝える。判断を伴うツールの説明には「人間の明示的な指示があるときだけ呼ぶ。エージェントが自分の判断で呼ばない」と書いてある。MCP から行った操作は、CLI と同じく人間（`human`）の操作として記録される。
+
+| ツール | 引数 | 内容 |
+| --- | --- | --- |
+| `list_spikes` | `project` | 未解決のスパイクを一覧する（参照のみ。`caucus spike list` 相当） |
+| `answer_spike` | `spike_id`, `answer` | スパイクに回答する（`caucus spike answer` 相当）。回答はストーリーの決定事項に追加される |
+| `approve_plan` | `project` | 計画を承認する（`caucus sprint approve` 相当） |
+| `reject_plan` | `project`, `comment` | 計画を差し戻す（`caucus sprint reject` 相当）。コメントは必須（空は不可） |
+| `start_sprint` | `project` | スプリントを開始し、バックグラウンドで実行する（`caucus sprint start --detach` 相当） |
+| `stop_sprint` | `project` | 実行中のスプリントを止める（`caucus sprint stop` 相当） |
+| `resume_sprint` | `project` | 停止したスプリントをバックグラウンドで再開する（`caucus sprint resume --detach` 相当） |
+| `get_review` | `project` | レビュー資料の Markdown 本文と保存先を返す（参照のみ。`caucus review show` 相当） |
+| `add_feedback` | `project`, `body`, `story_id`（任意） | フィードバックを登録する（`caucus feedback add` 相当） |
+| `complete_review` | `project` | レビューを完了し、スプリントを終了する（`caucus review done` 相当） |
+
+- `start_sprint` と `resume_sprint` は常にバックグラウンドで実行し、完了を待たずにスプリント番号・ブランチ・pid・ログの保存先を返す。進み具合は `caucus status` や `caucus sprint logs` で確認する
+- 既に実行中のスプリントの開始・再開と、実行中でないスプリントの停止はエラーになる（二重には起動しない）
+- `answer_spike` で、AI プランナーが設定されていてストーリーの未解決のスパイクがなくなった場合は、ストーリーの見直し（`caucus plan refine` 相当）をバックグラウンドで始め、完了を待たずに返る（`refine_started: true`）。ログは `CAUCUS_HOME/logs/refine/` に出る。見直しのプロセスを起動できなかった場合も回答は記録され、`refine_started: false` と、起動できなかった理由をメッセージで返す
+- AI プランナーがスプリント計画を作成中（`plan_sprint` の実行中）は、`approve_plan`・`reject_plan` はエラーになる（完了時に AI の計画で置き換わるため）。`answer_spike` は回答だけを記録し、見直しは始めない（作成中の計画に回答が反映される）
+- `start_sprint` でスプリントを開始した後に実行プロセスを起動できなかった場合、スプリントは開始済みのまま残る。原因を取り除いてから `resume_sprint` で再開する
+- `get_review` は、AI プランナーが設定されていると初回は確認手順を AI に書かせるため数分かかることがある。`complete_review` も、未変換のフィードバックを AI が変換するため時間がかかることがある
+
 ## 開発
 
 ```bash

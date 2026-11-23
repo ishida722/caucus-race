@@ -54,3 +54,17 @@ def open_spikes(repo: Repository, stories: list[Story]) -> list[Spike]:
     if not stories:
         return []
     return repo.query(Spike, story_id=[s.id for s in stories], status=SpikeStatus.OPEN)
+
+
+def story_to_refine(repo: Repository, spike: Spike) -> Story | None:
+    """スパイクに回答した後、AI にストーリーを見直させるべきなら、そのストーリーを返す。
+
+    AI プランナーが設定されていて、ストーリーの未解決のスパイクがなくなった場合に見直す。
+    """
+    story = repo.get(Story, spike.story_id)
+    project = repo.get(Project, story.project_id)
+    if project.planner_config.get("type", "manual") == "manual":
+        return None
+    if repo.query(Spike, story_id=story.id, status=SpikeStatus.OPEN):
+        return None
+    return story
